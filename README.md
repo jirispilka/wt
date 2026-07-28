@@ -1,88 +1,56 @@
-# wt — git worktrees as KDE Activities
+# wt
 
-One branch = one git worktree = one KDE Plasma Activity with its own colored
-desktop, terminal, IDE, browser, and a live PR/CI status widget.
+`wt add fix/timeout` gives you:
 
-```
-wt add fix/timeout          # worktree + activity + wezterm + IDE + Chrome, all set up
-# ...work, push, get reviewed...
-wt list                     # all branches, numbered: agent (claude/codex), PR, CI, reviews
-wt switch                   # fzf picker with status preview — or wt switch 2
-wt remove feat/timeout      # by branch (from anywhere), by number (wt remove 2),
-                            # or bare from inside the worktree; -f forces dirty
-                            # worktree + unmerged (squash-merged) branch deletion
-```
+- a git worktree at `~/.worktrees/<repo>/fix/timeout`
+- a KDE Activity `<repo>: fix/timeout` — its desktop a solid color per repo,
+  hue-shifted per branch (turn on *Accent color → From current wallpaper* and
+  the whole UI tints per branch)
+- wezterm, your IDE and Chrome (dedicated profile; tabs: the branch's PR,
+  claude.ai/code, your `WT_URLS`) opened in the worktree and pinned to the
+  activity — new windows you open there stay there, which Plasma/Wayland
+  doesn't do on its own
+- a status card on that desktop: what to do next, then PR / CI / reviews /
+  uncommitted+unpushed / linked issues, plus what your coding agents are doing
+  right now
 
-## What you get
+`Meta+Tab`, KRunner, `wt switch` (fzf) or `Meta+1..6` switch branch, desktop,
+windows and status all at once. `wt remove` closes the windows, removes
+worktree + activity, deletes the branch only if merged. `wt list` is the same
+overview in the terminal, numbered — the numbers feed `switch` and `remove`.
+Command semantics, session flags, edge cases: `wt --help`.
 
-- **Isolation**: each branch lives in `~/.worktrees/<repo>/<branch>` with a KDE
-  Activity named `<repo>: <branch>`. Switching activities (`Meta+Tab`, or
-  KRunner → type branch name) switches your whole context.
-- **Color coding**: the activity's desktop is a solid color per repo, hue-shifted
-  per branch. Enable *System Settings → Colors → Accent color → From current
-  wallpaper* and the whole UI tints per activity.
-- **Auto-opened apps**: wezterm (in the worktree), your IDE (worktree as
-  project), Chrome (dedicated profile so your personal session/history is
-  untouched; tabs: the branch's PR — or the branch on GitHub, or the repo —
-  plus claude.ai/code (the tied session if there is one, see below) and any
-  `WT_URLS` you configure).
-- **claude.ai/code sessions, without the browser**: `wt cloud` lists the web
-  sessions, urgent first — `needs you` (a live prompt waiting on you), `failed`,
-  `working`, `your turn` (the last turn ended asking something), `done` — each
-  with its branch, its age, and the one-line "where I left off" the session
-  itself wrote. Branch names are OSC-8 links: ctrl-click opens the session.
-  Idle >48h drops off (`--all` keeps it); `wt list` appends the ones with no
-  worktree here as `cloud elsewhere`.
-- **Cloud dashboard**: `wt dashboard` puts that list on a desktop (default the
-  `Work` activity) as a `wt board` card — two lines per session, the branch
-  linking to the session, a `local` badge on the ones you have checked out, and
-  a hover button that either switches to that worktree's activity or checks the
-  branch out (`wt add`) if it has none. It also (re)installs the branch card on
-  every worktree activity, so it is the one command for fixing widgets.
-- **Cloud session on the branch row**: a worktree is tied to the session that
-  pushed its branch, so the widget's agent row carries a `cloud your turn 11h`
-  chip linking straight to the session, ranked next to the local agents. Only a
-  live prompt or a fresh failure takes over the verdict — nearly every session
-  *ends* by asking something, so that state is informational by design.
-  The link is found automatically (live session list, else the PR body) and can
-  be set by hand with `wt add <branch> --session <url|session_…>`; it lives in
-  the worktree's gitdir, and Chrome then opens that session instead of the list.
-- **Start from a session**: `wt add <session_…|cse_…|claude.ai/code URL>` checks
-  out whatever branch that session pushed and ties the worktree to it.
-- **Verdict-first status**: every surface leads with "what's the next action"
-  — `! codex needs you`, `✘ merge conflicts`, `✘ CI failing · 1/2`,
-  `✔ ready to merge`, `⧗ waiting on 2 reviews`, `merged — wt remove?` — then
-  the facts (PR, CI counts, per-reviewer state, linked issues).
-- **Status card** on each activity desktop, drawn by the `wt board` plasmoid:
-  branch and repo on top, the verdict as a coloured pill on the right, then a
-  label/value list with a fixed row skeleton — same information always at the
-  same place, dim placeholders when a slot is empty: `agent` · `local`
-  (`3 uncommitted · 2 unpushed`, live, catches "agent finished but never
-  pushed") · `pr` link + state + `+603 −2259` size · `title` · `ci` (failing
-  check by name, `✘ tests ✔ 15`) · `rev` (`✔MQ37 ○alice`) · `issues` links.
-  PR, issue and session links are clickable. Refreshes instantly when you switch
-  to the activity, else cached (GitHub hit ≤1/min current, ≤1/10min background).
-- **Coding-agent awareness**, fresh every ~5s, with brand-colored names in the widget (claude orange, codex green):
-  Claude via Code hooks (`wt-agent-state`; busy/blocked/idle +
-  process-liveness guard), Codex hook-free (rollout write age + wezterm pane
-  title "Action Required" for the blocked state), Cursor hook-free
-  (`~/.cursor/chats/<md5-of-workspace-path>/` write age; no blocked detection
-  yet). A blocked or working agent overrides the verdict — it is the branch's
-  current actor.
-- **Activity descriptions + icons** mirror the verdict, so the `Meta+Q`
-  switcher is a live dashboard: warning triangle = needs you / CI failing,
-  gear = agent working / CI running, green check = ready or merged.
-- **Window discipline**: new windows opened inside an activity stay in that
-  activity (fixes the Plasma/Wayland default where they appear everywhere).
-- **Terminal dashboard**: `wt list` (numbered, ANSI-styled — glyphs + color
-  instead of emoji, stripped when piped) and `wt switch` (fzf rows carrying
-  live agent + cached PR status; Enter switches). `wt switch <n>` jumps
-  straight to entry n. Plain activities are included too — non-wt activities
-  (e.g. Work) first, Personal pinned last.
-- **Shortcuts**: `Meta+1..6` → `wt switch 1..6` (list order at press time);
-  `Meta+A` cycles activities (Plasma built-in).
-- **Teardown**: `wt remove` closes the activity's windows, removes the worktree
-  and activity, deletes the branch only if merged.
+## Status
+
+Every surface — widget, `wt list` row, the activity's icon and description in
+the `Meta+Q` switcher — leads with a verdict, "what's the next action":
+`! codex needs you`, `✘ merge conflicts`, `✘ CI failing · 1/2`,
+`⧗ waiting on 2 reviews`, `✔ ready to merge`, `merged — wt remove?`. Facts
+follow in a fixed row skeleton: `agent` · `local` (`3 uncommitted · 2 unpushed`,
+live — catches "agent finished but never pushed") · `pr` (link, state,
+`+603 −2259`) · `title` · `ci` (failing check by name) · `rev` (`✔MQ37 ○alice`)
+· `issues`. Refreshes instantly on activity switch, else cached — GitHub is hit
+at most 1/min for the current activity, 1/10min for background ones.
+
+## Coding agents
+
+The card's `agent` row is live (~5s): Claude Code via hooks (`wt-agent-state`;
+busy/blocked/idle), Codex hook-free (rollout write age; a wezterm pane titled
+"Action Required" = blocked), Cursor hook-free (chat-dir write age, no blocked
+detection). A working or blocked agent overrides the verdict — it's the
+branch's current actor.
+
+claude.ai/code cloud sessions count too: `wt cloud` lists them urgent-first
+(`needs you` / `failed` / `working` / `your turn` / `done`) with branch, age,
+and the session's own "where I left off" line; branches are OSC-8 links.
+A worktree is tied to the session that pushed its branch (auto-detected from
+the live list or the PR body, or set with `--session`), giving the card a
+`cloud your turn 11h` chip and Chrome that session as a tab. `wt add
+<session-id|URL>` starts from the other end: checks out whatever branch the
+session pushed. `wt dashboard` puts the session list on a desktop as a card —
+`local` badge on branches you have checked out, hover button to switch or
+`wt add` — and reinstalls every branch card, so it's the one command for
+fixing widgets.
 
 ## Requirements
 

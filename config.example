@@ -1,0 +1,21 @@
+# wt config — copy to ~/.config/wt/config. Plain shell, sourced by wt.
+# Everything is optional; these are the defaults.
+
+# IDE opened on the worktree, run as: $WT_IDE <worktree-path>. May carry flags.
+#WT_IDE="webstorm"
+
+# Chrome --profile-directory. Make a dedicated profile so wt windows don't
+# clobber your personal session-restore; find its directory name in
+# ~/.config/google-chrome/Local State ("Profile 2", "Profile 8", ...).
+#WT_CHROME_PROFILE="Default"
+
+# Extra Chrome tabs opened in every new worktree, space-separated.
+#WT_URLS="https://console.apify.com"
+
+# Plain activity where 'wt dashboard' puts the cloud-session card.
+#WT_DASHBOARD_ACTIVITY="Work"
+
+# Window classes pinned to the new activity. If you change WT_IDE, put its
+# window class here (find it: qdbus6 org.kde.KWin /KWin queryWindowInfo, then
+# click the window).
+#WT_WINDOW_CLASSES="jetbrains-webstorm org.wezfurlong.wezterm google-chrome"

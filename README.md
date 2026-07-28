@@ -4,14 +4,13 @@ One branch = one git worktree = one KDE Plasma Activity with its own colored
 desktop, terminal, IDE, browser, and a live PR/CI status widget.
 
 ```
-wt add fix/timeout          # worktree + activity + wezterm + WebStorm + Chrome, all set up
+wt add fix/timeout          # worktree + activity + wezterm + IDE + Chrome, all set up
 # ...work, push, get reviewed...
 wt list                     # all branches, numbered: agent (claude/codex), PR, CI, reviews
 wt switch                   # fzf picker with status preview — or wt switch 2
 wt remove feat/timeout      # by branch (from anywhere), by number (wt remove 2),
                             # or bare from inside the worktree; -f forces dirty
                             # worktree + unmerged (squash-merged) branch deletion
-
 ```
 
 ## What you get
@@ -22,10 +21,11 @@ wt remove feat/timeout      # by branch (from anywhere), by number (wt remove 2)
 - **Color coding**: the activity's desktop is a solid color per repo, hue-shifted
   per branch. Enable *System Settings → Colors → Accent color → From current
   wallpaper* and the whole UI tints per activity.
-- **Auto-opened apps**: wezterm (in the worktree), WebStorm (worktree as project),
-  Chrome (dedicated profile so your personal session/history is untouched; tabs:
-  the branch's PR — or the branch on GitHub, or the repo — plus claude.ai/code
-  (the tied session if there is one, see below) and console.apify.com).
+- **Auto-opened apps**: wezterm (in the worktree), your IDE (worktree as
+  project), Chrome (dedicated profile so your personal session/history is
+  untouched; tabs: the branch's PR — or the branch on GitHub, or the repo —
+  plus claude.ai/code (the tied session if there is one, see below) and any
+  `WT_URLS` you configure).
 - **claude.ai/code sessions, without the browser**: `wt cloud` lists the web
   sessions, urgent first — `needs you` (a live prompt waiting on you), `failed`,
   `working`, `your turn` (the last turn ended asking something), `done` — each
@@ -59,7 +59,7 @@ wt remove feat/timeout      # by branch (from anywhere), by number (wt remove 2)
   same place, dim placeholders when a slot is empty: `agent` · `local`
   (`3 uncommitted · 2 unpushed`, live, catches "agent finished but never
   pushed") · `pr` link + state + `+603 −2259` size · `title` · `ci` (failing
-  check by name, `✘ tests ✔ 15`) · `rev` (`✔MQ37 ○jirka`) · `issues` links.
+  check by name, `✘ tests ✔ 15`) · `rev` (`✔MQ37 ○alice`) · `issues` links.
   PR, issue and session links are clickable. Refreshes instantly when you switch
   to the activity, else cached (GitHub hit ≤1/min current, ≤1/10min background).
 - **Coding-agent awareness**, fresh every ~5s, with brand-colored names in the widget (claude orange, codex green):
@@ -87,57 +87,43 @@ wt remove feat/timeout      # by branch (from anywhere), by number (wt remove 2)
 ## Requirements
 
 KDE Plasma 6 (Wayland), `git`, `gh` (authenticated), `jq`, `python3`, `qdbus6`,
-wezterm, a JetBrains IDE, Google Chrome, zsh (for completion),
-and the `wt board` plasmoid from this repo (see Install).
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `wt` | main command: `add [-b]` / `remove [-f]` / `list` / `switch [n]` / `cloud` / `dashboard` (see `wt --help`) |
-| `wt-status` | renders PR/CI/review/agent status: one JSON card for the widget, plain ANSI text for `wt list` and the activity description; caches in `~/.cache/wt-status/` |
-| `wt-cloud` | claude.ai/code session list: `list` / `lookup <branch> [repo]` / `branch <session>` / `json` / `raw` / `refresh`; ~30s snapshot in `~/.cache/wt-status/cloud.json` |
-| `plasmoid/org.kde.wt.board/` | the Plasma 6 widget both cards render in: takes one JSON card on stdout from any command, resolves `ok/warn/error/info/dim` levels against the Plasma theme, hover rows, links, row actions |
-| `wt-activity-watch` | daemon: force-refreshes status the moment you switch activities |
-| `wt-tests.sh` | self-check: session-id normalization, PR-body scan, `wt-cloud` response parsing |
-| `wt-agent-state` | Claude Code hook helper: records session state (busy/blocked/idle) in `$XDG_RUNTIME_DIR/wt-agents/`; wire it into `~/.claude/settings.json` hooks (SessionStart/UserPromptSubmit/PermissionRequest/PostToolUse → busy states, Stop → idle, SessionEnd → cleanup) |
-| `wt-activity-watch.service` | systemd user unit for the daemon |
-| `completions/_wt` | zsh tab completion (subcommands, branches, removable worktrees) |
-| `kwin/wt-activity-bind/` | KWin script: bind new windows to the current activity |
+Google Chrome, zsh (for completion), and wezterm — the terminal is not
+configurable: codex blocked-detection reads wezterm pane titles. The IDE is
+(`WT_IDE`, default `webstorm` — any command taking a directory works).
 
 ## Install
 
 ```bash
-# 0. clone this repo somewhere stable, e.g.:
-#    git clone git@github.com:jirispilka/wt.git ~/github/wt
+# 0. clone somewhere stable — the install symlinks into it, edits take effect live
+git clone https://github.com/jirispilka/wt ~/github/wt
 REPO=~/github/wt
 
-# 1. main command on PATH (symlink, not copy — edits take effect immediately)
+# 1. commands on PATH
 ln -sfn "$REPO/wt" ~/.local/bin/wt
+ln -sfn "$REPO/wt-activity-watch" ~/.local/bin/wt-activity-watch
 
-# 1b. the wt board widget (symlink so edits take effect; plasmashell caches QML,
-#     so restart it once after any change to the plasmoid)
+# 2. the wt board widget (plasmashell caches QML — restart it after any plasmoid edit)
 ln -sfn "$REPO/plasmoid/org.kde.wt.board" ~/.local/share/plasma/plasmoids/org.kde.wt.board
 systemctl --user restart plasma-plasmashell    # discovers the new applet
 wt dashboard                                   # place the cards
 
-# 2. zsh completion — add BEFORE the oh-my-zsh/compinit line in ~/.zshrc:
+# 3. zsh completion — add BEFORE the oh-my-zsh/compinit line in ~/.zshrc:
 #    fpath=($REPO/completions $fpath)
 rm -f ~/.zcompdump*
 
-# 3. activity-switch watcher (edit ExecStart first if $REPO isn't ~/github/wt)
+# 4. activity-switch watcher (instant widget refresh on Meta+Tab)
 cp "$REPO/wt-activity-watch.service" ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now wt-activity-watch
 
-# 4. KWin script (new windows stay in the current activity)
+# 5. KWin script (new windows stay in the current activity)
 cp -r "$REPO/kwin/wt-activity-bind" ~/.local/share/kwin/scripts/
 kwriteconfig6 --file kwinrc --group Plugins --key wt-activity-bindEnabled true
 qdbus6 org.kde.KWin /KWin org.kde.KWin.reconfigure
 
-# 5. wezterm: new tabs follow the pane's cwd — add to ~/.zshrc (after plugins):
+# 6. wezterm: new tabs follow the pane's cwd — add to ~/.zshrc (after plugins):
 #    [[ $TERM_PROGRAM == WezTerm && -r /etc/profile.d/wezterm.sh ]] && source /etc/profile.d/wezterm.sh
 
-# 6. Claude Code agent-status hooks (jq appends to existing hooks, backup kept):
+# 7. Claude Code agent-status hooks (jq appends to existing hooks, backup kept):
 cp ~/.claude/settings.json ~/.claude/settings.json.bak
 jq --arg repo "$REPO" 'def h(cmd): {"hooks":[{"type":"command","command":cmd,"timeout":10}]};
     def hm(cmd): {"matcher":"*","hooks":[{"type":"command","command":cmd,"timeout":10}]};
@@ -149,10 +135,10 @@ jq --arg repo "$REPO" 'def h(cmd): {"hooks":[{"type":"command","command":cmd,"ti
     .hooks.SessionEnd        = (.hooks.SessionEnd // [])        + [h($repo + "/wt-agent-state end")]
 ' ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
 
-# 7. Meta+1..6 -> wt switch 1..6 (KDE global shortcuts)
-#    7a. free the keys MANUALLY first: System Settings -> Keyboard -> Shortcuts
+# 8. Meta+1..6 -> wt switch 1..6 (KDE global shortcuts)
+#    8a. free the keys MANUALLY first: System Settings -> Keyboard -> Shortcuts
 #        -> Plasma -> "Activate Task Manager Entry 1..N" -> remove Meta+N -> Apply
-#    7b. create launchers and bind (safe API; grant is the key code, [0] = refused):
+#    8b. create launchers and bind (safe API; grant is the key code, [0] = refused):
 for n in 1 2 3 4 5 6; do
   printf '[Desktop Entry]\nType=Application\nName=wt switch %d\nExec=%s/wt switch %d\nNoDisplay=true\n' \
     "$n" "$REPO" "$n" > ~/.local/share/applications/wt-switch-$n.desktop
@@ -168,58 +154,70 @@ done
 # crashed kwin_wayland (= the whole session) here. Free keys via the GUI only.
 ```
 
-Optional but recommended:
+## Configure
 
-- **Chrome profile**: create a profile named e.g. "wt" (so wt windows can't
-  clobber your personal session-restore), find its directory in
-  `~/.config/google-chrome/Local State`, and set it in `wt` (`--profile-directory`).
-- **Fresh wezterm opens in the worktree** — add to `~/.wezterm.lua`:
+Optional. `wt` sources `~/.config/wt/config` (plain shell) if it exists;
+without it you get the defaults below.
 
-  ```lua
-  local function wt_activity_cwd()
-    local f = io.popen 'qdbus6 org.kde.ActivityManager /ActivityManager/Activities org.kde.ActivityManager.Activities.CurrentActivity 2>/dev/null'
-    if not f then return nil end
-    local id = f:read '*l' or ''
-    f:close()
-    if id == '' then return nil end
-    f = io.popen("qdbus6 org.kde.ActivityManager /ActivityManager/Activities org.kde.ActivityManager.Activities.ActivityName '" .. id .. "' 2>/dev/null")
-    if not f then return nil end
-    local name = f:read '*l' or ''
-    f:close()
-    local repo, branch = name:match '^([^:]+): (.+)$'
-    if not repo then return nil end
-    local path = wezterm.home_dir .. '/.worktrees/' .. repo .. '/' .. branch
-    if os.rename(path, path) then return path end
-    return nil
-  end
-  local wt_cwd = wt_activity_cwd()
-  if wt_cwd then config.default_cwd = wt_cwd end
-  ```
+```bash
+cp "$REPO/config.example" ~/.config/wt/config   # then uncomment what you need
+```
 
-  and override the launcher to `Exec=wezterm start --always-new-process` in a
-  local copy of the desktop file (`~/.local/share/applications/`) — a plain
-  `wezterm start` delegates to the running instance and ignores fresh config.
+| Variable | Default | What |
+|---|---|---|
+| `WT_IDE` | `webstorm` | IDE command, run as `$WT_IDE <worktree-path>`; may carry flags |
+| `WT_CHROME_PROFILE` | `Default` | Chrome `--profile-directory`. Make a dedicated profile so wt windows can't clobber your personal session-restore; directory names are in `~/.config/google-chrome/Local State` |
+| `WT_URLS` | *(empty)* | extra Chrome tabs per worktree, space-separated |
+| `WT_DASHBOARD_ACTIVITY` | `Work` | plain activity that gets the cloud-session card |
+| `WT_WINDOW_CLASSES` | `jetbrains-webstorm org.wezfurlong.wezterm google-chrome` | window classes pinned to the new activity — change alongside `WT_IDE` |
 
-## Customize
+Beyond the config file, in `wt` itself: `repo_color()` pins a hex color per
+repo (fallback: hash-picked palette), and the `addWidget` block sets widget
+geometry/refresh interval.
 
-All in `wt`:
+Recommended wezterm extra — fresh windows open in the current activity's
+worktree. Add to `~/.wezterm.lua`:
 
-- `repo_color()` — hex color per repo (fallback: hash-picked palette).
-- Launched apps + their window classes (`jetbrains-webstorm`,
-  `org.wezfurlong.wezterm`, `google-chrome`) — swap for your terminal/IDE.
-- Widget geometry/interval in the `addWidget` block.
+```lua
+local function wt_activity_cwd()
+  local f = io.popen 'qdbus6 org.kde.ActivityManager /ActivityManager/Activities org.kde.ActivityManager.Activities.CurrentActivity 2>/dev/null'
+  if not f then return nil end
+  local id = f:read '*l' or ''
+  f:close()
+  if id == '' then return nil end
+  f = io.popen("qdbus6 org.kde.ActivityManager /ActivityManager/Activities org.kde.ActivityManager.Activities.ActivityName '" .. id .. "' 2>/dev/null")
+  if not f then return nil end
+  local name = f:read '*l' or ''
+  f:close()
+  local repo, branch = name:match '^([^:]+): (.+)$'
+  if not repo then return nil end
+  local path = wezterm.home_dir .. '/.worktrees/' .. repo .. '/' .. branch
+  if os.rename(path, path) then return path end
+  return nil
+end
+local wt_cwd = wt_activity_cwd()
+if wt_cwd then config.default_cwd = wt_cwd end
+```
 
-## Live copies on this machine
+and override the launcher to `Exec=wezterm start --always-new-process` in a
+local copy of the desktop file (`~/.local/share/applications/`) — a plain
+`wezterm start` delegates to the running instance and ignores fresh config.
 
-`wt`, `wt-status`, `wt-cloud`, `wt-agent-state`, `wt-activity-watch`, `completions/_wt`,
-`plasmoid/org.kde.wt.board/` (symlinked into `~/.local/share/plasma/plasmoids/`),
-and this README live in `~/github/jirispilka/wt/` (`wt` symlinked from `~/.local/bin/wt`).
-The systemd unit is in `~/.config/systemd/user/`, the KWin script in
-`~/.local/share/kwin/scripts/wt-activity-bind/`, the wezterm snippet in
-`~/.wezterm.lua`, the agent-status hooks in `~/.claude/settings.json`, the
-Meta+1..6 launchers in `~/.local/share/applications/wt-switch-*.desktop`
-(bindings in `~/.config/kglobalshortcutsrc`). To publish, collect those into
-a repo matching the layout in the Files table.
+## Files
+
+| File | Purpose |
+|---|---|
+| `wt` | main command: `add [-b]` / `remove [-f]` / `list` / `switch [n]` / `cloud` / `dashboard` (see `wt --help`) |
+| `wt-status` | renders PR/CI/review/agent status: one JSON card for the widget, plain ANSI text for `wt list` and the activity description; caches in `~/.cache/wt-status/` |
+| `wt-cloud` | claude.ai/code session list: `list` / `lookup <branch> [repo]` / `branch <session>` / `json` / `raw` / `refresh`; ~30s snapshot in `~/.cache/wt-status/cloud.json` |
+| `config.example` | annotated template for `~/.config/wt/config` |
+| `plasmoid/org.kde.wt.board/` | the Plasma 6 widget both cards render in: takes one JSON card on stdout from any command, resolves `ok/warn/error/info/dim` levels against the Plasma theme, hover rows, links, row actions |
+| `wt-activity-watch` | daemon: force-refreshes status the moment you switch activities |
+| `wt-tests.sh` | self-check: session-id normalization, PR-body scan, `wt-cloud` response parsing |
+| `wt-agent-state` | Claude Code hook helper: records session state (busy/blocked/idle) in `$XDG_RUNTIME_DIR/wt-agents/`; wired into `~/.claude/settings.json` by install step 7 |
+| `wt-activity-watch.service` | systemd user unit for the daemon (expects the step-1 symlink in `~/.local/bin`) |
+| `completions/_wt` | zsh tab completion (subcommands, branches, removable worktrees) |
+| `kwin/wt-activity-bind/` | KWin script: bind new windows to the current activity |
 
 ## Notes
 

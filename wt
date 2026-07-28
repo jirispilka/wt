@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # wt add    [repo-dir] <branch-name> [base-branch]
-#   Creates a git worktree + a dedicated KDE Activity, then opens wezterm + WebStorm
+#   Creates a git worktree + a dedicated KDE Activity, then opens wezterm + IDE
 #   + Chrome in it. repo-dir defaults to the repo containing $PWD.
 # wt remove [[repo-dir] <branch-name>]
 #   Removes the worktree, deletes the branch (if merged), closes the activity's
@@ -9,6 +9,15 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# optional user config (see config.example); the file wins, defaults below fill the rest
+wt_config="${XDG_CONFIG_HOME:-$HOME/.config}/wt/config"
+[ -r "$wt_config" ] && . "$wt_config"
+: "${WT_IDE:=webstorm}"                    # run as: $WT_IDE <worktree-path>
+: "${WT_CHROME_PROFILE:=Default}"          # Chrome --profile-directory value
+: "${WT_URLS:=}"                           # extra Chrome tabs, space-separated
+: "${WT_DASHBOARD_ACTIVITY:=Work}"         # where 'wt dashboard' puts the cloud card
+: "${WT_WINDOW_CLASSES:=jetbrains-webstorm org.wezfurlong.wezterm google-chrome}"
 
 am="org.kde.ActivityManager"
 amp="/ActivityManager/Activities"
@@ -27,7 +36,7 @@ usage() {
 
 help() {
     cat <<'EOF'
-wt — one git worktree = one KDE Activity (wezterm + WebStorm + Chrome)
+wt — one git worktree = one KDE Activity (wezterm + IDE + Chrome)
 
 USAGE
   wt add [repo-dir] <branch-name> [--session <url|id>]
@@ -46,7 +55,7 @@ USAGE
 ADD
   Creates a worktree at ~/.worktrees/<repo>/<branch>, creates a KDE Activity
   named "<repo>: <branch>" (desktop colored by repo), switches to it, and opens
-  wezterm, WebStorm, and Chrome ("wt" profile) pinned to that activity.
+  wezterm, your IDE ($WT_IDE), and Chrome pinned to that activity.
   Chrome opens the branch's open PR, else the branch on GitHub, else the repo.
 
   Branch resolution (git-like: a branch is only born with -b):
@@ -102,7 +111,7 @@ CLOUD
 
 DASHBOARD
   Installs or repairs every wt board card: the cloud session list on one plain
-  activity (default 'Work', pass another name to place it elsewhere) plus a
+  activity (default $WT_DASHBOARD_ACTIVITY, pass another name explicitly) plus a
   branch card on each worktree activity. Use it after changing the widget, or to
   fix a card without reopening the whole workspace the way 'wt add' does.
   Each card is recreated in place — a desktop applet cannot be resized through
@@ -114,6 +123,10 @@ SWITCH
   fzf picker over the same entries; Enter switches to the activity.
   'wt switch <n>' skips the picker and jumps straight to entry n from
   wt list (Meta+1..4 are bound to entries 1-4).
+
+CONFIG
+  ~/.config/wt/config (plain shell, all optional — see config.example):
+  WT_IDE, WT_CHROME_PROFILE, WT_URLS, WT_DASHBOARD_ACTIVITY, WT_WINDOW_CLASSES.
 
 EXAMPLES
   wt add fix/timeout                       # existing branch, local or on origin
@@ -345,7 +358,7 @@ dashboard)
     # Install/repair every wt card: the cloud session list on one plain activity
     # (default Work) plus a branch card on each worktree activity. Separate from
     # 'wt add' so widgets can be fixed without reopening the whole workspace.
-    act_name="${1:-Work}"
+    act_name="${1:-$WT_DASHBOARD_ACTIVITY}"
     activity_id="$(find_activity "$act_name")"
     [ -n "$activity_id" ] || { echo "wt: no activity named '$act_name'" >&2; exit 1; }
     n=$(install_board "$activity_id" "$script_dir/wt-cloud json" wt-cloud 800 430 10000) \
@@ -608,8 +621,9 @@ add)
     # unrelated wezterm/WebStorm windows opened during those 120s get pulled in too.
     kwin_script="$(mktemp --suffix=.js)"
     kwin_plugin="wt-assign-$activity_id"
+    classes_js="$(printf '"%s",' $WT_WINDOW_CLASSES)"
     cat > "$kwin_script" <<EOF
-var classes = ["jetbrains-webstorm", "org.wezfurlong.wezterm", "google-chrome"];
+var classes = [${classes_js%,}];
 workspace.windowAdded.connect(function (w) {
     if (classes.indexOf(w.resourceClass) !== -1) {
         w.activities = ["$activity_id"];
@@ -626,7 +640,7 @@ EOF
     # setsid + /dev/null: fully detach GUI apps so their runtime warnings
     # (e.g. libwayland "proxies still attached") don't spill into the terminal
     setsid wezterm start --always-new-process --cwd "$worktree_path" >/dev/null 2>&1 &
-    setsid webstorm "$worktree_path" >/dev/null 2>&1 &
+    setsid $WT_IDE "$worktree_path" >/dev/null 2>&1 &    # unquoted: WT_IDE may carry flags
     # Chrome tab: open PR for the branch if one exists, branch tree if pushed, repo root otherwise.
     gh_url=""
     if command -v gh >/dev/null 2>&1; then
@@ -638,10 +652,10 @@ EOF
             fi
         fi
     fi
-    # "wt" Chrome profile — isolates session/history from personal profiles
-    setsid google-chrome --new-window --profile-directory="Profile 8" \
+    # dedicated Chrome profile — isolates session/history from personal profiles
+    setsid google-chrome --new-window --profile-directory="$WT_CHROME_PROFILE" \
         ${gh_url:+"$gh_url"} "${session:-https://claude.ai/code}" \
-        "https://console.apify.com" >/dev/null 2>&1 &
+        $WT_URLS >/dev/null 2>&1 &
     ;;
 
 remove)

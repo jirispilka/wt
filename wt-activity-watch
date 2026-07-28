@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Instantly refresh the wt status widget when switching KDE activities.
+# Listens for CurrentActivityChanged; rewriting the widget's tooltipCommand
+# makes the Command Output plasmoid re-run its command immediately.
+set -u
+
+script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+am="org.kde.ActivityManager"
+amp="/ActivityManager/Activities"
+ami="org.kde.ActivityManager.Activities"
+
+poke() { # <activity-id>
+    local id="$1" name repo branch
+    name=$(qdbus6 "$am" "$amp" "$ami.ActivityName" "$id" 2>/dev/null) || return 0
+    repo="${name%%: *}"
+    branch="${name#*: }"
+    [ "$repo" != "$name" ] || return 0                       # not a "<repo>: <branch>" activity
+    [ -d "$HOME/.worktrees/$repo/$branch" ] || return 0
+    # refresh cache + activity description now; the widget re-reads it within ~5s
+    "$script_dir/wt-status" "$HOME/.worktrees/$repo/$branch" force >/dev/null 2>&1
+}
+
+# uuid arrives as `   string "..."` on the line after the signal header
+dbus-monitor --session "type='signal',interface='$ami',member='CurrentActivityChanged'" 2>/dev/null |
+while IFS= read -r line; do
+    case "$line" in
+        *member=CurrentActivityChanged*)
+            IFS= read -r arg || break
+            id=${arg#*\"}
+            id=${id%\"*}
+            [ -n "$id" ] && poke "$id"
+            ;;
+    esac
+done

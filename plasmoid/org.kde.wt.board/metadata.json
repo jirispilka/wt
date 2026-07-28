@@ -1,0 +1,18 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Jiri Spilka"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Branch status and claude.ai/code sessions, fed by wt",
+        "Icon": "git-branch",
+        "Id": "org.kde.wt.board",
+        "License": "MIT",
+        "Name": "wt board",
+        "Version": "1.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

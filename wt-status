@@ -1,0 +1,469 @@
+#!/usr/bin/env bash
+# wt-status <worktree-path> [force|plain|preview] — one-glance branch status.
+#
+# Composition model: every surface leads with a VERDICT ("what's the next
+# action for this branch"), then FACTS (PR, CI counts, reviews), then detail.
+#   widget  (default): one JSON card for the wt board plasmoid
+#   activity desc/icon: plain 2-line text + a state icon (Meta+Q switcher)
+#   plain   : ANSI-styled 2-line summary (wt list)
+#   preview : like plain but cache-only — never gh, never qdbus (wt switch)
+#   force   : skip the cache (activity-switch watcher)
+set -uo pipefail
+
+script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+path="${1:?usage: wt-status <worktree-path> [force|plain|preview]}"
+mode="${2:-}"
+nl=$'\n'
+
+cd "$path" 2>/dev/null || { echo "worktree gone: $path"; exit 0; }
+
+branch=$(git branch --show-current 2>/dev/null)
+[ -n "$branch" ] || { echo "detached HEAD"; exit 0; }
+
+am="org.kde.ActivityManager"
+amp="/ActivityManager/Activities"
+ami="org.kde.ActivityManager.Activities"
+
+# Find the "<repo>: <branch>" activity this worktree belongs to (empty if none).
+# Skipped in preview/plain modes — display-only callers don't write the
+# description; the widget keeps it fresh anyway.
+repo_name=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")")
+
+activity_id=""
+if [ "$mode" != "preview" ] && [ "$mode" != "plain" ]; then
+    act_name="$repo_name: $branch"
+    for id in $(qdbus6 "$am" "$amp" "$ami.ListActivities" 2>/dev/null); do
+        if [ "$(qdbus6 "$am" "$amp" "$ami.ActivityName" "$id" 2>/dev/null)" = "$act_name" ]; then
+            activity_id="$id"
+            break
+        fi
+    done
+fi
+
+state_dir="${XDG_RUNTIME_DIR:-/tmp}/wt-agents"
+now=$(date +%s)
+
+# claude.ai/code session this worktree continues, if any. Written by
+# 'wt add --session' and (below) learned from the PR body, so every surface —
+# including cache hits and preview mode — can show it without a fresh gh call.
+git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || git_dir=""
+session_file="${git_dir:+$git_dir/wt-session}"
+session_url=""
+[ -n "$session_file" ] && session_url=$(cat "$session_file" 2>/dev/null)
+
+fmt_age() { # seconds -> 42s / 7m / 3h
+    if [ "$1" -lt 60 ]; then echo "${1}s"
+    elif [ "$1" -lt 3600 ]; then echo "$(( $1 / 60 ))m"
+    else echo "$(( $1 / 3600 ))h"; fi
+}
+
+# The status vocabulary is written with emoji (they carry color in the plain
+# activity description). stylize() renders it for terminals (ANSI); the widget
+# path maps the same glyphs to semantic levels in compose().
+stylize() {
+    local G=$'\e[32m' RD=$'\e[31m' Y=$'\e[33m' M=$'\e[35m' C=$'\e[36m' D=$'\e[2m' B=$'\e[1m' R=$'\e[0m'
+    sed -E \
+        -e "s/🤖 /${G}●${R} /g" \
+        -e "s/✋ /${RD}${B}!${R} /g" \
+        -e "s/💤 /${D}∙${R} /g" \
+        -e "s/❔ /${Y}?${R} /g" \
+        -e "s/needs you/${RD}needs you${R}/g" \
+        -e "s/🟣 merged/${M}merged${R}/" \
+        -e "s/⛔ closed/${RD}closed${R}/" \
+        -e "s/❌ changes requested/${RD}✘ changes requested${R}/" \
+        -e "s/❌ merge conflicts/${RD}✘ merge conflicts${R}/" \
+        -e "s/❌ CI failing/${RD}✘ CI failing${R}/" \
+        -e "s/⏳ CI running/${Y}⟳ CI running${R}/" \
+        -e "s/✅ ready to merge/${G}✔ ready to merge${R}/" \
+        -e "s/⏳ waiting on/${Y}⧗ waiting on${R}/" \
+        -e "s/📝 draft/${D}draft${R}/" \
+        -e "s/🌱 no PR yet/${D}no PR yet${R}/" \
+        -e "s/🔧 open/open/" \
+        -e "s/PR (#[0-9]+)/${C}PR \1${R}/" \
+        -e "s/❌([0-9]+)/${RD}✘\1${R}/g" \
+        -e "s/⏳([0-9]+) reviews/${Y}⧗\1 reviews${R}/" \
+        -e "s/⏳([0-9]+)/${Y}⟳\1${R}/g" \
+        -e "s/✅([0-9]+)/${G}✔\1${R}/g" \
+        -e "s/✎([0-9]+)/${Y}✎\1${R}/" \
+        -e "s/↑([1-9][0-9]*)/${Y}↑\1${R}/"
+}
+
+count_in_worktree() { # <pgrep-args…> — matching processes with cwd in $path.
+    # A wrapper and the child it exec'd both match (cursor-agent) — count only
+    # processes whose parent is not itself a match.
+    local p ppid n=0 pids
+    pids=" $(pgrep "$@" 2>/dev/null | tr '\n' ' ') "
+    for p in $pids; do
+        case "$(readlink "/proc/$p/cwd" 2>/dev/null)" in
+            "$path"|"$path"/*)
+                ppid=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null)
+                case "$pids" in *" $ppid "*) continue ;; esac
+                n=$(( n + 1 )) ;;
+        esac
+    done
+    echo "$n"
+}
+
+# ---- coding-agent status --------------------------------------------------
+# agent_status: display line(s), emoji vocabulary. agent_rank: how urgent —
+# 3 blocked (needs the human), 2 working, 1 idle/open, 0 no agent.
+agent_status=""
+agent_rank=0
+add_agent() { # <rank> <line>
+    agent_status="${agent_status:+$agent_status · }$2"
+    [ "$1" -gt "$agent_rank" ] && agent_rank=$1
+}
+
+claude_n=$(count_in_worktree -x claude)
+if [ "$claude_n" -gt 0 ]; then
+    cl="claude"
+    [ "$claude_n" -gt 1 ] && cl="claude ×$claude_n"
+    # several sessions: the most attention-worthy state wins, ties -> newest
+    best_rank=0 best_state="" best_ts=$now
+    for f in "$state_dir"/*; do
+        [ -f "$f" ] || continue
+        IFS=$'\t' read -r agent st scwd sts < "$f" || continue
+        [ "$agent" = claude ] || continue
+        case "$scwd" in "$path"|"$path"/*) ;; *) continue ;; esac
+        case "$st" in blocked) r=3 ;; busy) r=2 ;; idle) r=1 ;; *) r=0 ;; esac
+        if [ "$r" -gt "$best_rank" ] || { [ "$r" -eq "$best_rank" ] && [ "$sts" -gt "$best_ts" ]; }; then
+            best_rank=$r best_state=$st best_ts=$sts
+        fi
+    done
+    case "$best_state" in
+        blocked) add_agent 3 "✋ $cl needs you $(fmt_age $(( now - best_ts )))" ;;
+        busy)    add_agent 2 "🤖 $cl working $(fmt_age $(( now - best_ts )))" ;;
+        idle)    add_agent 1 "💤 $cl done $(fmt_age $(( now - best_ts ))) ago" ;;
+        # session predates the hooks (or launched without them)
+        *)       add_agent 1 "🤖 $cl open" ;;
+    esac
+else
+    # session gone: sweep its state files so a crash can't leave a stale line
+    for f in "$state_dir"/*; do
+        [ -f "$f" ] || continue
+        IFS=$'\t' read -r agent st scwd sts < "$f" || continue
+        [ "$agent" = claude ] || continue
+        case "$scwd" in "$path"|"$path"/*) rm -f "$f" ;; esac
+    done
+fi
+
+codex_n=$(count_in_worktree -x codex)
+if [ "$codex_n" -gt 0 ]; then
+    cx="codex"
+    [ "$codex_n" -gt 1 ] && cx="codex ×$codex_n"
+    # newest rollout whose header cwd is this worktree
+    rollout=$(find "$HOME/.codex/sessions" -name 'rollout-*.jsonl' -mtime -2 \
+            -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2- |
+        while IFS= read -r f; do
+            [ "$(head -1 "$f" | jq -r '.payload.cwd // empty' 2>/dev/null)" = "$path" ] \
+                && { echo "$f"; break; }
+        done)
+    r_age=""
+    [ -n "$rollout" ] && r_age=$(( now - $(stat -c %Y "$rollout") ))
+
+    # codex titles its wezterm pane "Action Required" while waiting for
+    # approval — the one state the rollout write age can't tell apart from
+    # a long-running command
+    codex_blocked=""
+    for s in "${XDG_RUNTIME_DIR:-/run/user/$UID}"/wezterm/gui-sock-*; do
+        [ -S "$s" ] || continue
+        if WEZTERM_UNIX_SOCKET="$s" timeout 2 wezterm cli list --format json 2>/dev/null |
+            jq -e --arg p "$path/" \
+                'any(.[]; ((.cwd // "") | endswith($p)) and (.title | test("Action Required")))' >/dev/null; then
+            codex_blocked=1
+            break
+        fi
+    done
+
+    if [ -n "$codex_blocked" ]; then
+        add_agent 3 "✋ $cx needs you${r_age:+ $(fmt_age "$r_age")}"
+    elif [ -z "$r_age" ]; then
+        add_agent 1 "🤖 $cx open"
+    # ponytail: no turn-done signal without codex notify hooks — write age
+    # is the heuristic; a >60s shell command reads as "quiet" while it runs
+    elif [ "$r_age" -lt 60 ]; then
+        add_agent 2 "🤖 $cx active $(fmt_age "$r_age") ago"
+    else
+        add_agent 1 "💤 $cx quiet $(fmt_age "$r_age")"
+    fi
+fi
+
+cursor_n=$(count_in_worktree -f cursor-agent)
+if [ "$cursor_n" -gt 0 ]; then
+    cu="cursor"
+    [ "$cursor_n" -gt 1 ] && cu="cursor ×$cursor_n"
+    # cursor-agent keys its session store by md5 of the workspace path;
+    # newest write under it is the activity signal (same heuristic as codex)
+    chat_dir="$HOME/.cursor/chats/$(printf %s "$path" | md5sum | cut -d' ' -f1)"
+    c_age=""
+    newest=$(find "$chat_dir" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+    [ -n "$newest" ] && c_age=$(( now - ${newest%.*} ))
+    # ponytail: no blocked detection for cursor yet — its pane title behavior
+    # is unverified; add when observed
+    if [ -z "$c_age" ]; then
+        add_agent 1 "🤖 $cu open"
+    elif [ "$c_age" -lt 60 ]; then
+        add_agent 2 "🤖 $cu active $(fmt_age "$c_age") ago"
+    else
+        add_agent 1 "💤 $cu quiet $(fmt_age "$c_age")"
+    fi
+fi
+
+# ---- claude.ai/code session working on this branch -------------------------
+# No process to look at: wt-cloud keeps a ~30s snapshot of the session list and
+# matches this branch against the branches those sessions pushed. Skipped in
+# preview (fzf must stay instant — it shows the cached chip instead).
+cloud_state="" cloud_age="" cloud_url=""
+if [ "$mode" != "preview" ] && [ -x "$script_dir/wt-cloud" ]; then
+    IFS=$'\t' read -r cloud_state cloud_age cloud_url < <(
+        "$script_dir/wt-cloud" lookup "$branch" \
+            "$(git remote get-url origin 2>/dev/null)" 2>/dev/null) || true
+    if [ -n "$cloud_url" ] && [ "$cloud_url" != "$session_url" ] && [ -n "$session_file" ]; then
+        session_url="$cloud_url"
+        printf '%s\n' "$session_url" > "$session_file" 2>/dev/null || true
+    fi
+fi
+case "$cloud_state" in
+    working)   add_agent 2 "🤖 cloud working $(fmt_age "$cloud_age")" ;;
+    needs-you) add_agent 3 "✋ cloud needs you $(fmt_age "$cloud_age")" ;;
+    failed)
+        # ponytail: a failure you have not looked at in hours is a to-do, not an
+        # interrupt — only a fresh one takes the verdict. Tune the hour here.
+        [ "$cloud_age" -lt 3600 ] && r=3 || r=1
+        add_agent "$r" "✋ cloud failed $(fmt_age "$cloud_age")" ;;
+    # the last turn ended on a question: pending, never the verdict — every
+    # cloud session ends this way, so it would drown out everything else
+    your-turn) add_agent 1 "❔ cloud your turn $(fmt_age "$cloud_age")" ;;
+    done)      add_agent 1 "💤 cloud done $(fmt_age "$cloud_age") ago" ;;
+    # link known (hand-set, or read off the PR body) but no live state
+    *)       [ -n "$session_url" ] && add_agent 1 "💤 cloud linked" ;;
+esac
+
+# ---- local working-tree state — live like the agent line, never cached ----
+dirty=$(git status --porcelain 2>/dev/null | wc -l)
+unpushed=$(git rev-list --count '@{u}..HEAD' 2>/dev/null) || unpushed=0
+local_status=""
+[ "$dirty" -gt 0 ] && local_status="✎$dirty"
+[ "${unpushed:-0}" -gt 0 ] && local_status="${local_status:+$local_status }↑$unpushed"
+local_plain=""
+[ "$dirty" -gt 0 ] && local_plain="$dirty uncommitted"
+[ "${unpushed:-0}" -gt 0 ] && local_plain="${local_plain:+$local_plain · }$unpushed unpushed"
+
+# ---- caches -----------------------------------------------------------------
+# The widget ticks every ~5s but almost always gets the cache (no API calls).
+# GitHub is hit only when the cache is stale: 55s for the current activity,
+# 10 min for inactive ones — or immediately with "force".
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/wt-status"
+mkdir -p "$cache_dir"
+# v2 in the name: the widget body changed shape (table rows), so old caches
+# must not be rendered inside the new skeleton
+cache_file="$cache_dir/$(printf %s "$path" | cksum | cut -d' ' -f1).v3.json"
+touch "$cache_file.run"    # heartbeat: proves the widget tick is alive
+
+# Merge the live agent state into the cached/fresh PR pieces and emit for the
+# current mode. The agent can OVERRIDE the verdict: a blocked or working agent
+# is the branch's current actor, whatever the PR says.
+compose() { # <html-body> <verdict> <facts> <icon>
+    local html="$1" verdict="$2" facts="$3" icon="$4"
+    case "$agent_rank" in
+        3) verdict="$agent_status" icon="dialog-warning" ;;
+        2) verdict="$agent_status" icon="system-run" ;;
+        1) facts="${facts:+$facts · }$agent_status" ;;
+    esac
+    facts="$facts${local_status:+ · $local_status}"
+    if [ "$mode" = "plain" ] || [ "$mode" = "preview" ]; then
+        printf '%s\n' "$verdict${facts:+$nl$facts}" | stylize
+    else
+        # Fixed skeleton: same rows, same order, dim placeholders — the eye
+        # learns positions, states change in place. Identity + verdict on top,
+        # details in a two-column table (a plain QML Text with tags renders as
+        # RichText, so tables align for free; the applet sizes to this content).
+        # Levels, not colors: the widget resolves them against the Plasma theme.
+        # jq does all the quoting.
+        jq -cn --arg branch "$branch" --arg repo "$repo_name" \
+            --arg verdict "$verdict" --arg agent "$agent_status" \
+            --arg localtxt "$local_plain" --arg url "$session_url" \
+            --argjson rows "${html:-[]}" '
+            # the emoji vocabulary is internal; here it becomes glyph + level
+            def glyph: gsub("🤖";"●") | gsub("✋";"!") | gsub("💤";"∙") | gsub("❔";"?");
+            def lvl: if test("^✋") then "error" elif test("^🤖") then "ok"
+                     elif test("^❔") then "warn" else "dim" end;
+            {title: $branch, subtitle: $repo, layout: "fields",
+             badge: {text: ($verdict | glyph | sub("^[^ ]+ "; "")),
+                     level: ($verdict | if test("✅|🟣") then "ok"
+                                        elif test("❌|⛔|✋") then "error"
+                                        elif test("⏳|🤖|❔") then "warn"
+                                        else "dim" end)},
+             rows: ([{label: "agent",
+                      spans: (if $agent == "" then [{t: "—", level: "dim"}]
+                              else ($agent | split(" · ") | map(
+                                  {t: (. | glyph), level: lvl}
+                                  + (if test("cloud") and $url != "" then {url: $url} else {} end)))
+                              end)},
+                     {label: "local",
+                      spans: (if $localtxt == "" then [{t: "clean", level: "ok"}]
+                              else [{t: $localtxt, level: "warn"}] end)}]
+                    + $rows)}'
+        if [ -n "$activity_id" ]; then
+            qdbus6 "$am" "$amp" "$ami.SetActivityDescription" \
+                "$activity_id" "$verdict$nl$facts" >/dev/null 2>&1
+            [ "$(qdbus6 "$am" "$amp" "$ami.ActivityIcon" "$activity_id" 2>/dev/null)" = "$icon" ] \
+                || qdbus6 "$am" "$amp" "$ami.SetActivityIcon" "$activity_id" "$icon" >/dev/null 2>&1
+        fi
+    fi
+    exit 0
+}
+
+read_desc_cache() { # -> verdict, facts, icon globals (returns 1 if no cache)
+    [ -f "$cache_file.desc" ] || return 1
+    verdict=$(sed -n 1p "$cache_file.desc")
+    facts=$(sed -n 2p "$cache_file.desc")
+    icon=$(cat "$cache_file.icon" 2>/dev/null) || icon="git-branch"
+    [ -n "$icon" ] || icon="git-branch"
+}
+
+if [ "$mode" = "preview" ]; then
+    if read_desc_cache; then
+        compose "" "$verdict" "$facts" "$icon"
+    fi
+    compose "" "(no cached PR status yet — run wt list)" "" "git-branch"
+fi
+
+if [ "$mode" != "force" ] && [ -f "$cache_file" ] && [ -f "$cache_file.desc" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$cache_file") ))
+    if [ -n "$activity_id" ] \
+        && [ "$activity_id" = "$(qdbus6 "$am" "$amp" "$ami.CurrentActivity" 2>/dev/null)" ]; then
+        max_age=55
+    else
+        max_age=600
+    fi
+    if [ "$age" -lt "$max_age" ] && read_desc_cache; then
+        compose "$(cat "$cache_file")" "$verdict" "$facts" "$icon"
+    fi
+fi
+
+finish() { # <html-body> <verdict> <facts> <icon> — cache, then emit
+    printf '%s' "$1" > "$cache_file"
+    printf '%s\n%s' "$2" "$3" > "$cache_file.desc"
+    printf '%s' "$4" > "$cache_file.icon"
+    compose "$1" "$2" "$3" "$4"
+}
+
+# ---- fresh PR data ----------------------------------------------------------
+pr_json=$(gh pr view --json number,title,url,state,isDraft,author,reviewDecision,latestReviews,reviewRequests,statusCheckRollup,closingIssuesReferences,additions,deletions,mergeStateStatus,body 2>/dev/null) || pr_json=""
+
+if [ -z "$pr_json" ]; then
+    # No PR yet (or gh offline): local git picture + create-PR link.
+    base=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+    upstream=$(git rev-parse --abbrev-ref '@{u}' 2>/dev/null) || upstream=""
+    facts="$branch"
+    if [ -n "$base" ]; then
+        ahead=$(git rev-list --count "origin/$base..HEAD" 2>/dev/null) && facts="$facts · ↑$ahead"
+    fi
+    if [ -n "$upstream" ]; then facts="$facts · pushed"; else facts="$facts · not pushed"; fi
+    # same row skeleton as the PR case: pr / title-slot / ci+rev / issues
+    repo_url=$(gh repo view --json url -q .url 2>/dev/null) || repo_url=""
+    html=$(jq -cn --arg url "${repo_url:+$repo_url/compare/$branch?expand=1}" '
+        [{label: "pr",
+          spans: ([{t: "none", level: "dim"}]
+                  + (if $url != "" then [{t: "create PR ↗", url: $url}] else [] end))},
+         {label: "ci", spans: [{t: "—", level: "dim"}]},
+         {label: "rev", spans: [{t: "—", level: "dim"}]},
+         {label: "issues", spans: [{t: "—", level: "dim"}]}]')
+    finish "$html" "🌱 no PR yet" "$facts" "git-branch"
+fi
+
+me=$(gh api user -q .login 2>/dev/null) || me=""
+
+out=$(jq -r --arg me "$me" '
+    def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+    def cls: (.conclusion // .state // "PENDING");
+
+    (.statusCheckRollup // []) as $checks |
+    ([$checks[] | select(cls == "SUCCESS" or cls == "NEUTRAL" or cls == "SKIPPED")] | length) as $ok |
+    ([$checks[] | select(cls | IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE"))] | length) as $bad |
+    (($checks | length) - $ok - $bad) as $pend |
+    ([.reviewRequests[]?] | length) as $waiting |
+    (.author.login == $me) as $mine |
+
+    # verdict: the next action for this branch, most urgent condition first
+    (if .state == "MERGED" then "🟣 merged — wt remove?"
+     elif .state == "CLOSED" then "⛔ closed"
+     elif .reviewDecision == "CHANGES_REQUESTED" then "❌ changes requested"
+     elif .mergeStateStatus == "DIRTY" then "❌ merge conflicts"
+     elif $bad > 0 then "❌ CI failing · \($bad)/\($checks | length)"
+     elif $pend > 0 then "⏳ CI running · \($pend) left"
+     elif .reviewDecision == "APPROVED" then "✅ ready to merge"
+     elif $waiting > 0 then "⏳ waiting on \($waiting) review\(if $waiting > 1 then "s" else "" end)"
+     elif .isDraft then "📝 draft"
+     else "🔧 open" end) as $verdict |
+
+    (if $verdict | test("merged|ready") then "dialog-ok-apply"
+     elif $verdict | test("failing|changes|closed|conflicts") then "dialog-warning"
+     elif $verdict | test("running") then "system-run"
+     else "git-branch" end) as $icon |
+
+    ("PR #\(.number) \(if $mine then "mine" else "by \(.author.login | esc)" end)"
+        + (if ($checks | length) > 0 then
+             " · CI" + (if $bad > 0 then " ❌\($bad)" else "" end)
+                     + (if $pend > 0 then " ⏳\($pend)" else "" end)
+                     + " ✅\($ok)"
+           else "" end)
+        + (if $waiting > 0 then " · ⏳\($waiting) reviews" else "" end)) as $facts |
+
+    # widget rows: label + spans of {text, level, url}. No markup and no manual
+    # escaping — the renderer owns the colors, jq owns the quoting.
+    ([{t: "#\(.number)", url: .url}, {t: (if $mine then "mine" else "by \(.author.login)" end)}]
+      + (if .state == "MERGED" then [{t: "merged", level: "info"}]
+         elif .state == "CLOSED" then [{t: "closed", level: "error"}]
+         elif .reviewDecision == "APPROVED" then [{t: "approved", level: "ok"}]
+         elif .isDraft then [{t: "draft", level: "dim"}]
+         else [] end)
+      + [{t: "+\(.additions) −\(.deletions)", level: "dim"}]) as $row_pr |
+    ([$checks[] | select(cls | IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE"))
+        | {t: ("✘ " + ((.name // .context // "?") | if length > 28 then .[:25] + "…" else . end)),
+           level: "error"}]) as $badrows |
+    ((if ($checks | length) == 0 then [{t: "—", level: "dim"}]
+      else $badrows[0:1]
+        + (if $bad > 1 then [{t: "+\($bad - 1)", level: "error"}] else [] end)
+        + (if $pend > 0 then [{t: "⟳ \($pend)", level: "warn"}] else [] end)
+        + [{t: "✔ \($ok)", level: "ok"}]
+      end)) as $row_ci |
+    (([.latestReviews[]? |
+        (if .state == "APPROVED" then {t: "✔\(.author.login)", level: "ok"}
+         elif .state == "CHANGES_REQUESTED" then {t: "✘\(.author.login)", level: "error"}
+         else {t: "✎\(.author.login)", level: "dim"} end)]
+      # ○ not ⧗ here: no hourglass in the widget font stack; ✔/✘/○ are safe
+      # (and no apostrophes in this program — it is single-quoted shell)
+      + [.reviewRequests[]? | {t: "○\(.login // .name // "?")", level: "warn"}]) as $revs |
+     (if ($revs | length) > 0 then $revs else [{t: "none yet", level: "dim"}] end)) as $row_rev |
+    ([.closingIssuesReferences[]? | {t: "#\(.number)", url: .url}]) as $iss |
+    # cloud sessions link back to themselves from the PR body they opened
+    (((.body // "") | [scan("https://claude\\.ai/code/session_[A-Za-z0-9_-]+")] | last) // "") as $session |
+
+    $icon, $verdict, $facts, $session,
+    ([{label: "pr", spans: $row_pr},
+      {label: "title", text: .title, level: "dim"},
+      {label: "ci", spans: $row_ci},
+      {label: "rev", spans: $row_rev},
+      {label: "issues",
+       spans: (if ($iss | length) > 0 then $iss else [{t: "—", level: "dim"}] end)}]
+     | tojson)
+' <<<"$pr_json")
+
+icon="${out%%$'\n'*}"; out="${out#*$'\n'}"
+verdict="${out%%$'\n'*}"; out="${out#*$'\n'}"
+facts="${out%%$'\n'*}"; out="${out#*$'\n'}"
+pr_session="${out%%$'\n'*}"
+html="${out#*$'\n'}"
+
+# Remember what the PR body told us, so cache hits, preview mode and wt add see
+# the session too. The PR wins over a stale hand-set link, the live API over the
+# PR (a branch can get a second session).
+if [ -z "$cloud_url" ] && [ -n "$pr_session" ] && [ "$pr_session" != "$session_url" ] \
+    && [ -n "$session_file" ]; then
+    session_url="$pr_session"
+    printf '%s\n' "$session_url" > "$session_file" 2>/dev/null || true
+fi
+finish "$html" "$verdict" "$facts" "$icon"

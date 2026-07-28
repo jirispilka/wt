@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Claude Code hook helper: record the session's state so wt-status can show it.
+# usage: wt-agent-state busy|idle|blocked|end   (hook JSON arrives on stdin)
+# State lives in $XDG_RUNTIME_DIR/wt-agents/<session-id> — wiped on reboot.
+set -u
+dir="${XDG_RUNTIME_DIR:-/tmp}/wt-agents"
+mkdir -p "$dir"
+json=$(cat)
+sid=$(jq -r '.session_id // empty' <<<"$json" 2>/dev/null)
+[ -n "$sid" ] || exit 0
+if [ "${1:-}" = end ]; then
+    rm -f "$dir/$sid"
+    exit 0
+fi
+cwd=$(jq -r '.cwd // empty' <<<"$json" 2>/dev/null)
+printf 'claude\t%s\t%s\t%s\n' "${1:-busy}" "$cwd" "$(date +%s)" > "$dir/$sid"

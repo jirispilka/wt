@@ -1,0 +1,708 @@
+#!/usr/bin/env bash
+# wt add    [repo-dir] <branch-name> [base-branch]
+#   Creates a git worktree + a dedicated KDE Activity, then opens wezterm + WebStorm
+#   + Chrome in it. repo-dir defaults to the repo containing $PWD.
+# wt remove [[repo-dir] <branch-name>]
+#   Removes the worktree, deletes the branch (if merged), closes the activity's
+#   windows and removes the KDE Activity. With no arguments, infers the worktree
+#   from $PWD (run it from inside the worktree you want gone).
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+am="org.kde.ActivityManager"
+amp="/ActivityManager/Activities"
+ami="org.kde.ActivityManager.Activities"
+kwin="org.kde.KWin"
+kwins="/Scripting"
+kwini="org.kde.kwin.Scripting"
+
+usage() {
+    echo "usage: wt add [repo-dir] <branch> | -b <new-branch> [base] | <session-id>" >&2
+    echo "       wt remove [-f] [[repo-dir] <branch-name> | <number>]" >&2
+    echo "       wt list | wt switch [number] | wt cloud | wt dashboard [activity]" >&2
+    echo "run 'wt --help' for details" >&2
+    exit 1
+}
+
+help() {
+    cat <<'EOF'
+wt — one git worktree = one KDE Activity (wezterm + WebStorm + Chrome)
+
+USAGE
+  wt add [repo-dir] <branch-name> [--session <url|id>]
+  wt add [repo-dir] -b <new-branch> [base-branch]
+  wt add [repo-dir] <session-id|claude.ai/code url>
+  wt remove [-f] [[repo-dir] <branch-name> | <number>]
+  wt list
+  wt switch [number]
+  wt cloud [--all]
+  wt dashboard [activity-name]
+  wt --help
+
+  repo-dir defaults to the repo containing the current directory.
+  It is recognized by containing a .git entry.
+
+ADD
+  Creates a worktree at ~/.worktrees/<repo>/<branch>, creates a KDE Activity
+  named "<repo>: <branch>" (desktop colored by repo), switches to it, and opens
+  wezterm, WebStorm, and Chrome ("wt" profile) pinned to that activity.
+  Chrome opens the branch's open PR, else the branch on GitHub, else the repo.
+
+  Branch resolution (git-like: a branch is only born with -b):
+    exists locally     -> checked out into the worktree
+    exists on origin   -> local tracking branch created (push updates the PR)
+    otherwise          -> refused, with the -b command to run
+    -b <new-branch>    -> created from base-branch (default: the main
+                          checkout's current HEAD); refused if it exists
+
+  Given a session id (session_…, cse_…, or a claude.ai/code URL) instead of a
+  branch, the branch is whatever that session pushed, and the worktree is tied
+  to it. Fails if the session has not pushed a branch yet.
+
+  Idempotent: re-running reuses the existing worktree/branch/activity.
+
+  --session <url|id>: tie the worktree to a claude.ai/code session (the one you
+  started on the web and are now continuing locally). Chrome opens that session
+  instead of the session list, and wt list / the widget show a clickable ☁ link.
+  Stored per-worktree, so re-running 'wt add <branch> --session …' sets it later.
+  For a branch whose PR body already links its session, wt-status finds it by
+  itself — no flag needed.
+
+REMOVE
+  Closes the activity's windows (graceful; unsaved-changes dialogs survive),
+  removes the worktree, deletes the branch (only if merged; warns otherwise),
+  and removes the activity.
+
+  With no arguments, run from inside a worktree: repo and branch are inferred.
+  A branch name works from anywhere (resolved across ~/.worktrees); a number
+  picks the wt-list entry.
+
+  -f / --force: remove even with uncommitted changes, and delete the branch
+  even if unmerged (squash-merged PRs always look unmerged to git). Careful:
+  both throw work away.
+
+LIST
+  Numbered entries: plain activities first (e.g. Work), then every worktree
+  under ~/.worktrees with coding-agent (claude/codex), PR, CI, and review
+  status, Personal last. ● marks the current activity. The numbers feed
+  'wt switch <n>' and 'wt remove <n>'.
+
+  Ends with a 'cloud elsewhere' block: active claude.ai/code sessions whose
+  branch has no worktree here (the ones with a worktree show up as that row's
+  cloud chip instead).
+
+CLOUD
+  Recent claude.ai/code sessions: 'needs you' (a live prompt) first, then
+  failed, working, 'your turn' (the last turn ended on a question) and done —
+  with the pushed branch, its age, and the one-line note the session left.
+  Branch names are OSC-8 links: ctrl-click opens the session. Idle >48h is
+  hidden; --all shows everything. Read-only, so you never have to open the
+  browser to see where things stand.
+
+DASHBOARD
+  Installs or repairs every wt board card: the cloud session list on one plain
+  activity (default 'Work', pass another name to place it elsewhere) plus a
+  branch card on each worktree activity. Use it after changing the widget, or to
+  fix a card without reopening the whole workspace the way 'wt add' does.
+  Each card is recreated in place — a desktop applet cannot be resized through
+  the scripting API, only replaced — so its position is kept but a manual resize
+  is not. An activity must have been visited once, or Plasma has not created its
+  desktop yet.
+
+SWITCH
+  fzf picker over the same entries; Enter switches to the activity.
+  'wt switch <n>' skips the picker and jumps straight to entry n from
+  wt list (Meta+1..4 are bound to entries 1-4).
+
+EXAMPLES
+  wt add fix/timeout                       # existing branch, local or on origin
+  wt add -b fix/timeout                    # new branch off the current HEAD
+  wt add -b fix/timeout master             # new branch based on master
+  wt add session_01GaQ7VgYvm3m865aY4HEWbE  # whatever that cloud session pushed
+  wt add ~/apify/apify-core fix/timeout    # from anywhere
+  wt remove                                # from inside the worktree
+  wt remove ~/apify/apify-core fix/timeout # from anywhere
+EOF
+    exit 0
+}
+
+# Install or repair one wt board card on an activity's desktops, and drop the
+# Command Output card it replaced. Prints the number of desktops touched.
+# <activity-id> <command> <replaced-command-match> <w> <h> <interval-ms>
+install_board() {
+    if [ ! -d "$HOME/.local/share/plasma/plasmoids/org.kde.wt.board" ]; then
+        echo "wt: board plasmoid not installed — see wt-README (Install)" >&2
+        return 1
+    fi
+    # A desktop applet keeps the geometry it was created with — Widget.geometry
+    # is read-only here — so resizing means recreating it. Position is kept.
+    qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "
+        var ds = desktopsForActivity(\"$1\"), n = 0;
+        for (var i = 0; i < ds.length; i++) {
+            var old = ds[i].widgets(\"com.github.zren.commandoutput\");
+            for (var j = 0; j < old.length; j++) {
+                old[j].currentConfigGroup = [\"General\"];
+                if (old[j].readConfig(\"command\").indexOf(\"$3\") !== -1) old[j].remove();
+            }
+            var x = 40, y = 40;
+            var ws = ds[i].widgets(\"org.kde.wt.board\");
+            for (var j = 0; j < ws.length; j++) {
+                // keep the old spot verbatim: a containment's coordinate space
+                // can start well below zero, so 'negative' is not 'invalid'
+                if (ws[j].geometry.width > 0) { x = ws[j].geometry.x; y = ws[j].geometry.y; }
+                ws[j].remove();
+            }
+            var w = ds[i].addWidget(\"org.kde.wt.board\", x, y, $4, $5);
+            w.currentConfigGroup = [\"General\"];
+            w.writeConfig(\"command\", \"$2\");
+            w.writeConfig(\"interval\", $6);
+            n++;
+        }
+        print(n);"
+}
+
+find_activity() {
+    for id in $(qdbus6 "$am" "$amp" "$ami.ListActivities"); do
+        if [ "$(qdbus6 "$am" "$amp" "$ami.ActivityName" "$id")" = "$1" ]; then
+            echo "$id"
+            return
+        fi
+    done
+}
+
+# Shift the repo base color's hue by up to ±20° per branch, so activities of the
+# same repo stay in one color family but are distinguishable.
+branch_tint() { # <base-hex> <branch-name>
+    command -v python3 >/dev/null 2>&1 || { echo "$1"; return; }
+    python3 - "$1" "$2" <<'EOF'
+import sys, colorsys, zlib
+base, branch = sys.argv[1], sys.argv[2]
+r, g, b = (int(base[i:i + 2], 16) / 255 for i in (1, 3, 5))
+h, l, s = colorsys.rgb_to_hls(r, g, b)
+shift = (zlib.crc32(branch.encode()) % 41 - 20) / 360
+r, g, b = colorsys.hls_to_rgb((h + shift) % 1, l, s)
+print('#%02x%02x%02x' % tuple(round(c * 255) for c in (r, g, b)))
+EOF
+}
+
+# Solid wallpaper color per repo; with "Accent color: from wallpaper" the UI follows.
+repo_color() {
+    case "$1" in
+        apify-mcp-server)          echo "#2e6fb7" ;;  # blue
+        apify-mcp-server-internal) echo "#7d3fa8" ;;  # purple
+        apify-core)                echo "#c26a1d" ;;  # apify orange
+        *)
+            local palette=("#2d7d6e" "#8a5a2b" "#5e7d2d" "#7d2d4f" "#2d5a7d" "#4a2d7d")
+            local sum
+            sum=$(printf %s "$1" | cksum | cut -d' ' -f1)
+            echo "${palette[sum % ${#palette[@]}]}"
+            ;;
+    esac
+}
+
+[ $# -ge 1 ] || usage
+cmd="$1"
+shift
+case "$cmd" in
+    add|remove|list|switch|cloud|dashboard) ;;
+    -h|--help|help) help ;;
+    *) usage ;;
+esac
+case "${1:-}" in -h|--help) help ;; esac
+
+norm_session() { # <claude.ai/code url | session_… | cse_… id> -> canonical URL
+    case "$1" in
+        https://claude.ai/code/session_*) printf '%s\n' "$1" ;;
+        session_*) printf 'https://claude.ai/code/%s\n' "$1" ;;
+        cse_*) printf 'https://claude.ai/code/session_%s\n' "${1#cse_}" ;;  # api form
+        *) return 1 ;;
+    esac
+}
+
+# -f/--force (remove only): force dirty-worktree removal + unmerged-branch deletion
+# -b (add only): create the branch, like git checkout -b
+# --session (add only): the claude.ai/code session this worktree continues
+force="" session="" newbranch=""
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f|--force) force=1 ;;
+        -b) newbranch=1 ;;
+        --session) [ $# -ge 2 ] || usage; session="$2"; shift ;;
+        --session=*) session="${1#*=}" ;;
+        *) args+=("$1") ;;
+    esac
+    shift
+done
+set -- ${args[@]+"${args[@]}"}
+[ -n "$force" ] && [ "$cmd" != remove ] && usage
+{ [ -n "$session" ] || [ -n "$newbranch" ]; } && [ "$cmd" != add ] && usage
+if [ -n "$session" ]; then
+    session=$(norm_session "$session") || {
+        echo "wt: --session wants https://claude.ai/code/session_… or a bare session_… id" >&2
+        exit 1
+    }
+fi
+
+bold=$'\e[1m' dim=$'\e[2m' green=$'\e[32m' rst=$'\e[0m'
+
+list_worktrees() {
+    # linked worktrees have a .git *file*; branch names may contain slashes
+    find "$HOME/.worktrees" -maxdepth 5 -name .git -type f 2>/dev/null |
+        sort | while IFS= read -r g; do dirname "$g"; done
+}
+
+wt_name() { # <worktree-path> -> "<repo>: <branch>" (the activity name)
+    local b r
+    b=$(git -C "$1" branch --show-current 2>/dev/null)
+    r=$(basename "$(dirname "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")")
+    echo "$r: $b"
+}
+
+# The numbered entry list shared by list/switch/remove: plain (non-worktree)
+# activities first, then wt worktrees, Personal pinned last.
+# Fills entry_names[] and entry_paths[] (empty path = plain activity).
+build_entries() {
+    entry_names=() entry_paths=()
+    local p id name w skip i
+    local wt_paths=() wt_names=() pre=() post=()
+    while IFS= read -r p; do
+        wt_paths+=("$p")
+        wt_names+=("$(wt_name "$p")")
+    done < <(list_worktrees)
+    for id in $(qdbus6 "$am" "$amp" "$ami.ListActivities" 2>/dev/null); do
+        name=$(qdbus6 "$am" "$amp" "$ami.ActivityName" "$id" 2>/dev/null)
+        skip=""
+        for w in ${wt_names[@]+"${wt_names[@]}"}; do
+            [ "$name" = "$w" ] && skip=1
+        done
+        [ -n "$skip" ] && continue
+        case "$name" in
+            Personal) post+=("$name") ;;
+            *)        pre+=("$name") ;;
+        esac
+    done
+    for name in ${pre[@]+"${pre[@]}"}; do entry_names+=("$name"); entry_paths+=(""); done
+    for i in "${!wt_paths[@]}"; do
+        entry_names+=("${wt_names[i]}")
+        entry_paths+=("${wt_paths[i]}")
+    done
+    for name in ${post[@]+"${post[@]}"}; do entry_names+=("$name"); entry_paths+=(""); done
+}
+
+case "$cmd" in
+list)
+    build_entries
+    cur_name=""
+    cur=$(qdbus6 "$am" "$amp" "$ami.CurrentActivity" 2>/dev/null) \
+        && cur_name=$(qdbus6 "$am" "$amp" "$ami.ActivityName" "$cur" 2>/dev/null)
+    # fan the status calls out in parallel (each may hit GitHub when its
+    # cache is stale) — wall time is the slowest row, not the sum
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    for i in "${!entry_names[@]}"; do
+        [ -n "${entry_paths[i]}" ] && "$script_dir/wt-status" "${entry_paths[i]}" plain > "$tmp/$i" &
+    done
+    wait
+    # bold branch, dim repo, status folded onto one line; ANSI is stripped
+    # when stdout is not a terminal (the status arrives pre-colored)
+    for i in "${!entry_names[@]}"; do
+        name="${entry_names[i]}"
+        mark="  "
+        [ "$name" = "$cur_name" ] && mark="$green●$rst "
+        if [ -n "${entry_paths[i]}" ]; then
+            printf '%2d %s%s%s%s %s%s%s\n' "$(( i + 1 ))" "$mark" "$bold" "${name#*: }" "$rst" "$dim" "${name%%: *}" "$rst"
+            body=""
+            while IFS= read -r l; do
+                body="${body:+$body $dim·$rst }$l"
+            done < "$tmp/$i"
+            printf '     %s\n\n' "$body"
+        else
+            printf '%2d %s%s%s%s %sactivity%s\n\n' "$(( i + 1 ))" "$mark" "$bold" "$name" "$rst" "$dim" "$rst"
+        fi
+    done | { [ -t 1 ] && cat || sed -E $'s/\x1b\\[[0-9;]*m//g'; }
+    [ "${#entry_names[@]}" -gt 0 ] || echo "no activities or worktrees found"
+    # claude.ai/code sessions with no worktree here — work you'd otherwise only
+    # see by opening the browser. Branches that do have a worktree are already
+    # covered by their row's cloud chip, so hand them over to be skipped.
+    if [ -x "$script_dir/wt-cloud" ]; then
+        mine=()
+        for i in "${!entry_names[@]}"; do
+            [ -n "${entry_paths[i]}" ] && mine+=("${entry_names[i]#*: }")
+        done
+        if cloud=$("$script_dir/wt-cloud" list ${mine[@]+"${mine[@]}"} 2>/dev/null |
+            sed 's/^/   /') && [ -n "$cloud" ]; then
+            printf '   %scloud%s %selsewhere%s\n%s\n\n' "$bold" "$rst" "$dim" "$rst" "$cloud"
+        fi
+    fi
+    exit 0
+    ;;
+cloud)
+    exec "$script_dir/wt-cloud" list "$@"
+    ;;
+dashboard)
+    # Install/repair every wt card: the cloud session list on one plain activity
+    # (default Work) plus a branch card on each worktree activity. Separate from
+    # 'wt add' so widgets can be fixed without reopening the whole workspace.
+    act_name="${1:-Work}"
+    activity_id="$(find_activity "$act_name")"
+    [ -n "$activity_id" ] || { echo "wt: no activity named '$act_name'" >&2; exit 1; }
+    n=$(install_board "$activity_id" "$script_dir/wt-cloud json" wt-cloud 800 430 10000) \
+        || exit 1
+    if [ "${n:-0}" = 0 ]; then
+        echo "wt: activity '$act_name' has no desktop yet — switch to it once, then re-run" >&2
+        exit 1
+    fi
+    echo "cloud sessions on '$act_name'"
+    build_entries
+    for i in "${!entry_names[@]}"; do
+        [ -n "${entry_paths[i]}" ] || continue
+        id="$(find_activity "${entry_names[i]}")"
+        [ -n "$id" ] || continue
+        install_board "$id" "$script_dir/wt-status ${entry_paths[i]}" \
+            wt-status 620 300 5000 >/dev/null && echo "branch card on '${entry_names[i]}'"
+    done
+    exit 0
+    ;;
+switch)
+    # a non-numeric argument is an activity name, used straight — that is how the
+    # board widget jumps to a branch, and it skips the whole entry scan
+    name=""
+    case "${1:-}" in
+        "") ;;
+        *[!0-9]*) name="$1" ;;
+    esac
+    if [ -n "$name" ]; then
+        :
+    elif [ -n "${1:-}" ]; then
+        build_entries
+        [ "$1" -ge 1 ] && name="${entry_names[$1 - 1]:-}" || name=""
+        [ -n "$name" ] || { echo "no entry #$1 (see wt list)" >&2; exit 1; }
+    else
+        build_entries
+        # the picker IS the list: live agent + cached PR status per row
+        # (preview mode = no gh, no qdbus), gathered in parallel
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        for i in "${!entry_names[@]}"; do
+            [ -n "${entry_paths[i]}" ] && "$script_dir/wt-status" "${entry_paths[i]}" preview > "$tmp/$i" &
+        done
+        wait
+        sel=$(for i in "${!entry_names[@]}"; do
+                n="${entry_names[i]}"
+                if [ -n "${entry_paths[i]}" ]; then
+                    body=""
+                    while IFS= read -r l; do
+                        body="${body:+$body $dim·$rst }$l"
+                    done < "$tmp/$i"
+                    printf '%d %s%s%s %s%s%s  %s\t%s\n' "$(( i + 1 ))" \
+                        "$bold" "${n#*: }" "$rst" "$dim" "${n%%: *}" "$rst" "$body" "$n"
+                else
+                    printf '%d %s%s%s\t%s\n' "$(( i + 1 ))" "$bold" "$n" "$rst" "$n"
+                fi
+            done | fzf --ansi --delimiter='\t' --with-nth=1) || exit 0
+        name="${sel##*$'\t'}"
+    fi
+    activity_id="$(find_activity "$name")"
+    if [ -z "$activity_id" ]; then
+        echo "no activity named '$name' — create it with: wt add ${name#*: }" >&2
+        exit 1
+    fi
+    qdbus6 "$am" "$amp" "$ami.SetCurrentActivity" "$activity_id"
+    exit 0
+    ;;
+esac
+
+# Optional repo-dir: recognized by containing .git (branch names never do).
+repo_dir="$PWD"
+explicit_repo=""
+if [ $# -ge 1 ] && [ -e "$1/.git" ]; then
+    repo_dir="$1"
+    explicit_repo=1
+    shift
+fi
+branch="${1:-}"
+base="${2:-}"
+
+# 'wt add <session-id|url>' / 'wt add --session <…>' — take the branch from the
+# cloud session, which is how work started on claude.ai/code lands here.
+case "$branch" in
+    session_*|cse_*|https://claude.ai/code/*)
+        session=$(norm_session "$branch") || { echo "wt: '$branch' is not a session" >&2; exit 1; }
+        branch=""
+        ;;
+esac
+if [ -z "$branch" ] && [ -n "$session" ]; then
+    branch=$("$script_dir/wt-cloud" branch "$session" \
+        "$(git -C "$repo_dir" remote get-url origin 2>/dev/null)") || branch=""
+    if [ -z "$branch" ]; then
+        echo "wt: no branch for $session — has that session pushed anything yet?" >&2
+        exit 1
+    fi
+    case "$branch" in *"
+"*) echo "wt: that session pushed several branches, pick one:" >&2
+        printf '  %s\n' $branch >&2; exit 1 ;;
+    esac
+    echo "session branch: $branch"
+fi
+
+worktree_path=""
+if [ -z "$branch" ]; then
+    # No branch given: infer the worktree from $PWD (remove only).
+    [ "$cmd" = "remove" ] || usage
+    worktree_path="$(git rev-parse --show-toplevel)"
+    if [ "$(git rev-parse --absolute-git-dir)" = "$(git rev-parse --path-format=absolute --git-common-dir)" ]; then
+        echo "not inside a linked worktree — pass <branch-name> explicitly" >&2
+        exit 1
+    fi
+    branch="$(git branch --show-current)"
+    if [ -z "$branch" ]; then
+        echo "detached HEAD — pass <branch-name> explicitly" >&2
+        exit 1
+    fi
+    repo_dir="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+fi
+
+# remove: also accept a wt-list number, or a branch checked out in any
+# ~/.worktrees worktree — so removal works from anywhere.
+if [ "$cmd" = remove ] && [ -n "$branch" ] && [ -z "$explicit_repo" ] && [ -z "$worktree_path" ]; then
+    resolved=""
+    case "$branch" in
+        *[!0-9]*) # branch name — scan wt-managed worktrees for it
+            matches=()
+            while IFS= read -r p; do
+                [ "$(git -C "$p" branch --show-current 2>/dev/null)" = "$branch" ] && matches+=("$p")
+            done < <(list_worktrees)
+            if [ "${#matches[@]}" -eq 1 ]; then
+                resolved="${matches[0]}"
+            elif [ "${#matches[@]}" -gt 1 ]; then
+                echo "branch '$branch' is checked out in several worktrees:" >&2
+                printf '  %s\n' "${matches[@]}" >&2
+                echo "disambiguate with: wt remove <repo-dir> $branch" >&2
+                exit 1
+            fi
+            # 0 matches: fall through to the PWD-based logic below
+            ;;
+        *) # wt-list number (same numbering as wt list / wt switch)
+            build_entries
+            resolved=""
+            [ "$branch" -ge 1 ] && resolved="${entry_paths[$branch - 1]:-}"
+            if [ -z "$resolved" ]; then
+                if [ "$branch" -ge 1 ] && [ -n "${entry_names[$branch - 1]:-}" ]; then
+                    echo "#$branch is activity '${entry_names[$branch - 1]}', not a worktree" >&2
+                else
+                    echo "no entry #$branch (see wt list)" >&2
+                fi
+                exit 1
+            fi
+            ;;
+    esac
+    if [ -n "$resolved" ]; then
+        worktree_path="$resolved"
+        branch=$(git -C "$resolved" branch --show-current)
+        repo_dir=$(dirname "$(git -C "$resolved" rev-parse --path-format=absolute --git-common-dir)")
+    fi
+fi
+
+repo_dir="$(git -C "$repo_dir" rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_dir")"
+[ -n "$worktree_path" ] || worktree_path="$HOME/.worktrees/$repo_name/$branch"
+activity_name="$repo_name: $branch"
+
+case "$cmd" in
+add)
+    if git -C "$repo_dir" worktree list --porcelain | grep -qxF "worktree $worktree_path"; then
+        echo "worktree already exists at $worktree_path, reusing"
+    else
+        # Resolve the branch BEFORE creating any directory, so a refusal leaves
+        # nothing behind. Like git: a branch is only born with -b.
+        local_ref="" remote_ref="" origin_down=""
+        git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$branch" && local_ref=1
+        # '|| rc=$?' not a bare call: set -e would abort before we read the code
+        rc=0
+        git -C "$repo_dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1 || rc=$?
+        case $rc in
+            0) remote_ref=1 ;;
+            2) ;;              # ran fine: origin has no such branch
+            *) origin_down=1   # offline, no ssh agent, … — must not claim it is missing
+               echo "warning: could not reach origin, going on local refs alone" >&2 ;;
+        esac
+        if [ -n "$newbranch" ] && { [ -n "$local_ref" ] || [ -n "$remote_ref" ]; }; then
+            echo "wt: branch '$branch' already exists — drop -b to check it out" >&2
+            exit 1
+        fi
+        if [ -z "$newbranch" ] && [ -z "$local_ref" ] && [ -z "$remote_ref" ]; then
+            if [ -n "$origin_down" ]; then
+                echo "wt: no local branch '$branch', and origin is unreachable" >&2
+            else
+                echo "wt: no branch '$branch' here or on origin" >&2
+                echo "    create it with: wt add -b $branch ${base:-[base-branch]}" >&2
+            fi
+            exit 1
+        fi
+        mkdir -p "$(dirname "$worktree_path")"
+        if [ -n "$newbranch" ]; then
+            git -C "$repo_dir" worktree add -b "$branch" "$worktree_path" ${base:+"$base"}
+        elif [ -n "$local_ref" ]; then
+            echo "branch '$branch' already exists, checking it out"
+            git -C "$repo_dir" worktree add "$worktree_path" "$branch"
+        else
+            echo "branch '$branch' exists on origin, checking out tracking branch"
+            git -C "$repo_dir" fetch origin "$branch"
+            git -C "$repo_dir" worktree add --track -b "$branch" "$worktree_path" "origin/$branch"
+        fi
+    fi
+
+    # The cloud-session link lives in the worktree's gitdir (outside the working
+    # tree, so it never shows up as a change, and it dies with the worktree).
+    # wt-status reads the same file — and refreshes it from the PR body.
+    session_file="$(git -C "$worktree_path" rev-parse --absolute-git-dir)/wt-session"
+    if [ -n "$session" ]; then
+        printf '%s\n' "$session" > "$session_file"
+    else
+        session=$(cat "$session_file" 2>/dev/null) || session=""
+        # first add of a branch a cloud session pushed: ask which session that was
+        if [ -z "$session" ] && [ -x "$script_dir/wt-cloud" ]; then
+            session=$("$script_dir/wt-cloud" lookup "$branch" \
+                "$(git -C "$worktree_path" remote get-url origin 2>/dev/null)" \
+                2>/dev/null | cut -f3) || session=""
+            [ -n "$session" ] && printf '%s\n' "$session" > "$session_file"
+        fi
+    fi
+    [ -n "$session" ] && echo "claude.ai session: $session"
+
+    activity_id="$(find_activity "$activity_name")"
+    if [ -z "$activity_id" ]; then
+        activity_id=$(qdbus6 "$am" "$amp" "$ami.AddActivity" "$activity_name")
+        qdbus6 "$am" "$amp" "$ami.SetActivityIcon" "$activity_id" "git-branch"
+    fi
+    qdbus6 "$am" "$amp" "$ami.SetCurrentActivity" "$activity_id"
+
+    # per-repo wallpaper color for the activity's desktop; plasma creates the
+    # desktop containment lazily for a brand-new activity, so poll until it exists
+    wall_color="$(branch_tint "$(repo_color "$repo_name")" "$branch")"
+    applied=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        applied=$(qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "
+            var ds = desktopsForActivity(\"$activity_id\");
+            for (var i = 0; i < ds.length; i++) {
+                ds[i].wallpaperPlugin = \"org.kde.color\";
+                ds[i].currentConfigGroup = [\"Wallpaper\", \"org.kde.color\", \"General\"];
+                ds[i].writeConfig(\"Color\", \"$wall_color\");
+            }
+            print(ds.length);")
+        [ "${applied:-0}" != "0" ] && break
+        sleep 0.5
+    done
+    [ "${applied:-0}" != "0" ] || echo "warning: activity desktop never appeared, wallpaper color not set"
+
+    # branch-status card on the activity desktop; idempotent, see install_board
+    install_board "$activity_id" "$script_dir/wt-status $worktree_path" \
+        wt-status 620 300 5000 >/dev/null || true
+
+    # ponytail: new windows don't reliably inherit the current activity on Wayland
+    # (xdg-activation ties them to the launching terminal instead), so force it via
+    # a throwaway KWin script. Only windows created AFTER this loads are assigned —
+    # never existing ones. Unloads after 120s (WebStorm cold start + trust dialog);
+    # unrelated wezterm/WebStorm windows opened during those 120s get pulled in too.
+    kwin_script="$(mktemp --suffix=.js)"
+    kwin_plugin="wt-assign-$activity_id"
+    cat > "$kwin_script" <<EOF
+var classes = ["jetbrains-webstorm", "org.wezfurlong.wezterm", "google-chrome"];
+workspace.windowAdded.connect(function (w) {
+    if (classes.indexOf(w.resourceClass) !== -1) {
+        w.activities = ["$activity_id"];
+    }
+});
+EOF
+    qdbus6 "$kwin" "$kwins" "$kwini.unloadScript" "$kwin_plugin" >/dev/null 2>&1 || true
+    qdbus6 "$kwin" "$kwins" "$kwini.loadScript" "$kwin_script" "$kwin_plugin" >/dev/null
+    qdbus6 "$kwin" "$kwins" "$kwini.start" >/dev/null
+    # fds redirected so the sleeper doesn't hold the caller's stdout/stderr open
+    (sleep 120; qdbus6 "$kwin" "$kwins" "$kwini.unloadScript" "$kwin_plugin" >/dev/null 2>&1; rm -f "$kwin_script") >/dev/null 2>&1 &
+    disown
+
+    # setsid + /dev/null: fully detach GUI apps so their runtime warnings
+    # (e.g. libwayland "proxies still attached") don't spill into the terminal
+    setsid wezterm start --always-new-process --cwd "$worktree_path" >/dev/null 2>&1 &
+    setsid webstorm "$worktree_path" >/dev/null 2>&1 &
+    # Chrome tab: open PR for the branch if one exists, branch tree if pushed, repo root otherwise.
+    gh_url=""
+    if command -v gh >/dev/null 2>&1; then
+        gh_url=$(cd "$worktree_path" && gh pr view --json url -q .url 2>/dev/null) || true
+        if [ -z "$gh_url" ]; then
+            gh_url=$(cd "$worktree_path" && gh repo view --json url -q .url 2>/dev/null) || true
+            if [ -n "$gh_url" ] && git -C "$repo_dir" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+                gh_url="$gh_url/tree/$branch"
+            fi
+        fi
+    fi
+    # "wt" Chrome profile — isolates session/history from personal profiles
+    setsid google-chrome --new-window --profile-directory="Profile 8" \
+        ${gh_url:+"$gh_url"} "${session:-https://claude.ai/code}" \
+        "https://console.apify.com" >/dev/null 2>&1 &
+    ;;
+
+remove)
+    activity_id="$(find_activity "$activity_name")"
+
+    # Git work first, while our terminal is alive to show errors (dirty
+    # worktree, unmerged branch). Window closing comes last and detached.
+    case "$PWD" in
+        "$worktree_path"|"$worktree_path"/*) cd "$repo_dir" ;;
+    esac
+    git -C "$repo_dir" worktree remove ${force:+--force} "$worktree_path"
+    rmdir -p "$(dirname "$worktree_path")" 2>/dev/null || true
+
+    # WebStorm writes .idea on shutdown at its own pace, resurrecting the removed
+    # directory. Janitor: sweep it later, but only if .idea is all there is.
+    (
+        sleep 30
+        if [ -d "$worktree_path" ] && [ "$(ls -A "$worktree_path")" = ".idea" ]; then
+            rm -rf "$worktree_path"
+            rmdir -p "$(dirname "$worktree_path")" 2>/dev/null
+        fi
+    ) >/dev/null 2>&1 &
+    disown
+
+    del_flag="-d"
+    [ -n "$force" ] && del_flag="-D"
+    if ! git -C "$repo_dir" branch "$del_flag" "$branch" 2>/dev/null; then
+        echo "branch '$branch' not deleted (unmerged?) — re-run with 'wt remove -f' if intended"
+    fi
+
+    if [ -z "$activity_id" ]; then
+        echo "no activity found named '$activity_name'"
+        exit 0
+    fi
+
+    # Closing the activity's windows may close the very terminal running this
+    # script (wt remove from inside the activity), so the window-close +
+    # activity-removal tail runs detached and survives our death.
+    # closeWindow() is a graceful close request — apps with unsaved-changes
+    # dialogs may survive it, which is intended.
+    kwin_script="$(mktemp --suffix=.js)"
+    kwin_plugin="wt-close-$activity_id"
+    cat > "$kwin_script" <<EOF
+workspace.windowList().forEach(function (w) {
+    if (w.activities.indexOf("$activity_id") !== -1) {
+        w.closeWindow();
+    }
+});
+EOF
+    teardown="$(mktemp --suffix=.sh)"
+    cat > "$teardown" <<EOF
+qdbus6 $kwin $kwins $kwini.unloadScript "$kwin_plugin" >/dev/null 2>&1
+qdbus6 $kwin $kwins $kwini.loadScript "$kwin_script" "$kwin_plugin" >/dev/null
+qdbus6 $kwin $kwins $kwini.start >/dev/null
+sleep 2
+qdbus6 $kwin $kwins $kwini.unloadScript "$kwin_plugin" >/dev/null 2>&1
+qdbus6 $am $amp $ami.RemoveActivity "$activity_id"
+rm -f "$kwin_script" "$teardown"
+EOF
+    setsid bash "$teardown" >/dev/null 2>&1 &
+    disown
+    echo "closing windows and removing activity '$activity_name'"
+    ;;
+esac

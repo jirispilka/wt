@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh wt status widget on KDE activity switch
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/github/jirispilka/wt/wt-activity-watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

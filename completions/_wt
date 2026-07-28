@@ -1,0 +1,93 @@
+#compdef wt
+
+_wt() {
+    local -a subcmds=(
+        'add:create worktree + KDE activity (wezterm, WebStorm, Chrome)'
+        'remove:close windows, remove worktree + activity'
+        'list:all worktrees with agent/PR/CI status'
+        'switch:fzf picker, Enter switches activity'
+        'cloud:claude.ai/code sessions, needs-you first'
+        'dashboard:install the cloud-session widget on an activity'
+    )
+    if (( CURRENT == 2 )); then
+        _describe 'wt command' subcmds
+        return
+    fi
+
+    local cmd=${words[2]} repo=.
+    local -i pos=CURRENT
+    # optional repo-dir first arg shifts the branch/base positions
+    if [[ -e ${words[3]}/.git ]]; then
+        repo=${words[3]}
+        (( pos-- ))
+    fi
+
+    # flags occupy no positional slot
+    local w newbranch=""
+    for w in ${words[2,CURRENT-1]}; do
+        case $w in
+            -b) newbranch=1; (( pos-- )) ;;
+            --session) (( pos -= 2 )) ;;
+            -f|--force|--all|--session=*) (( pos-- )) ;;
+        esac
+    done
+
+    # words that look like paths complete as directories (the repo-dir form)
+    if [[ ${words[CURRENT]} == (/|.|\~)* ]]; then
+        _path_files -/
+        return
+    fi
+
+    local -a branches
+    case $cmd in
+        cloud)
+            compadd -X 'flag' -- --all
+            ;;
+        dashboard)
+            local -a acts
+            local id
+            for id in ${(f)"$(qdbus6 org.kde.ActivityManager /ActivityManager/Activities \
+                    org.kde.ActivityManager.Activities.ListActivities 2>/dev/null)"}; do
+                acts+=("$(qdbus6 org.kde.ActivityManager /ActivityManager/Activities \
+                    org.kde.ActivityManager.Activities.ActivityName $id 2>/dev/null)")
+            done
+            compadd -X 'activity' -a acts
+            ;;
+        add)
+            if [[ ${words[CURRENT]} == -* ]]; then
+                compadd -X 'flag' -- -b --session
+            elif [[ ${words[CURRENT-1]} == --session ]]; then
+                _message 'claude.ai/code session URL or session_… id'
+            elif (( pos == 3 )); then
+                if [[ -n $newbranch ]]; then
+                    _message 'new branch name'
+                    return
+                fi
+                # origin branches too, stripped of the remote — wt add checks
+                # them out as tracking branches (that is how a cloud session's
+                # branch arrives here). Without -b nothing else is accepted.
+                branches=(${(f)"$(git -C $repo for-each-ref --format='%(refname:short)' refs/heads 2>/dev/null)"})
+                branches+=(${(f)"$(git -C $repo for-each-ref --format='%(refname:strip=3)' refs/remotes/origin 2>/dev/null)"})
+                branches=(${(u)branches:#HEAD})
+                compadd -X 'existing branch (local or on origin)' -a branches
+            elif (( pos == 4 )) && [[ -n $newbranch ]]; then
+                # base-branch only means something for a branch being created
+                branches=(${(f)"$(git -C $repo for-each-ref --format='%(refname:short)' refs/heads refs/remotes 2>/dev/null)"})
+                compadd -X 'base branch' -a branches
+            fi
+            ;;
+        remove)
+            if (( pos == 3 )); then
+                # branches checked out in any wt-managed worktree (wt remove
+                # resolves them across ~/.worktrees, no repo context needed)
+                local g
+                for g in ~/.worktrees/**/.git(N.); do
+                    branches+=("$(git -C ${g:h} branch --show-current 2>/dev/null)")
+                done
+                compadd -X 'wt worktree branch' -a branches
+            fi
+            ;;
+    esac
+}
+
+_wt "$@"

@@ -138,6 +138,8 @@ cp "$REPO/config.example" ~/.config/wt/config   # then uncomment what you need
 | `WT_URLS` | *(empty)* | extra Chrome tabs per worktree, space-separated |
 | `WT_DASHBOARD_ACTIVITY` | `Work` | plain activity that gets the cloud-session card |
 | `WT_WINDOW_CLASSES` | `jetbrains-webstorm org.wezfurlong.wezterm google-chrome` | window classes pinned to the new activity — change alongside `WT_IDE` |
+| `WT_CARD_CLOUD` | `1240 760` | cloud card size, `"<width> <height>"` px. Taller shows more sessions (the list scrolls past the bottom) |
+| `WT_CARD_BRANCH` | `1000 340` | branch card size, `"<width> <height>"` px. Wider means less eliding; it's a fixed 7 rows, so extra height is blank |
 
 Beyond the config file, in `wt` itself: the `addWidget` block sets widget
 geometry/refresh interval.

@@ -18,6 +18,13 @@ wt_config="${XDG_CONFIG_HOME:-$HOME/.config}/wt/config"
 : "${WT_URLS:=}"                   # extra Chrome tabs, space-separated
 : "${WT_DASHBOARD_ACTIVITY:=Work}" # where 'wt dashboard' puts the cloud card
 : "${WT_WINDOW_CLASSES:=jetbrains-webstorm org.wezfurlong.wezterm google-chrome}"
+# Card sizes, "<width> <height>" in pixels, passed to addWidget unquoted. A
+# desktop applet is sized once at creation and never resizes to its content
+# (see plasmoid/…/ui/main.qml), so these numbers are the whole layout. Wider
+# buys less eliding on both cards; taller only helps the cloud card, whose
+# list grows with the session count — the branch card is a fixed 7 rows.
+: "${WT_CARD_CLOUD:=1240 760}"
+: "${WT_CARD_BRANCH:=1000 340}"
 
 am="org.kde.ActivityManager"
 amp="/ActivityManager/Activities"
@@ -126,7 +133,8 @@ SWITCH
 
 CONFIG
   ~/.config/wt/config (plain shell, all optional — see config.example):
-  WT_IDE, WT_CHROME_PROFILE, WT_URLS, WT_DASHBOARD_ACTIVITY, WT_WINDOW_CLASSES.
+  WT_IDE, WT_CHROME_PROFILE, WT_URLS, WT_DASHBOARD_ACTIVITY, WT_WINDOW_CLASSES,
+  WT_CARD_CLOUD, WT_CARD_BRANCH.
 
 EXAMPLES
   wt add fix/timeout                       # existing branch, local or on origin
@@ -347,7 +355,7 @@ dashboard)
     echo "wt: no activity named '$act_name'" >&2
     exit 1
   }
-  n=$(install_board "$activity_id" "$script_dir/wt-cloud json" wt-cloud 800 430 10000) ||
+  n=$(install_board "$activity_id" "$script_dir/wt-cloud json" wt-cloud $WT_CARD_CLOUD 10000) ||
     exit 1
   if [ "${n:-0}" = 0 ]; then
     echo "wt: activity '$act_name' has no desktop yet — switch to it once, then re-run" >&2
@@ -360,7 +368,7 @@ dashboard)
     id="$(find_activity "${entry_names[i]}")"
     [ -n "$id" ] || continue
     install_board "$id" "$script_dir/wt-status ${entry_paths[i]}" \
-      wt-status 620 300 5000 >/dev/null && echo "branch card on '${entry_names[i]}'"
+      wt-status $WT_CARD_BRANCH 5000 >/dev/null && echo "branch card on '${entry_names[i]}'"
   done
   exit 0
   ;;
@@ -597,7 +605,7 @@ add)
 
   # branch-status card on the activity desktop; idempotent, see install_board
   install_board "$activity_id" "$script_dir/wt-status $worktree_path" \
-    wt-status 620 300 5000 >/dev/null || true
+    wt-status $WT_CARD_BRANCH 5000 >/dev/null || true
 
   # ponytail: new windows don't reliably inherit the current activity on Wayland
   # (xdg-activation ties them to the launching terminal instead), so force it via

@@ -19,3 +19,12 @@
 # window class here (find it: qdbus6 org.kde.KWin /KWin queryWindowInfo, then
 # click the window).
 #WT_WINDOW_CLASSES="jetbrains-webstorm org.wezfurlong.wezterm google-chrome"
+
+# Card sizes on the desktop, "<width> <height>" in pixels. A desktop applet is
+# sized once when it is created and never grows into its content, so these are
+# the whole layout; re-run 'wt dashboard' after changing them. Wider buys less
+# eliding on both cards. Taller only helps the cloud card (its list grows with
+# the session count and scrolls past the bottom) — the branch card is a fixed
+# 7 rows, so extra height is just blank space.
+#WT_CARD_CLOUD="1240 760"
+#WT_CARD_BRANCH="1000 340"

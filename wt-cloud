@@ -315,7 +315,9 @@ def cmd_branch(argv):
 def cmd_list(hide, show_all=False):
     """hide: branch names to leave out (they have a local worktree already)."""
     snap, err = refresh()
-    tty = sys.stdout.isatty()
+    # WT_TTY: `wt list` captures this output, so our own isatty() says no even
+    # though the text lands in a terminal. wt sets it only when its stdout is one.
+    tty = sys.stdout.isatty() or os.environ.get("WT_TTY") == "1"
     def c(code, t):
         return "\033[%sm%s\033[0m" % (code, t) if tty else t
     def link(url, t):  # OSC 8 — ctrl/cmd-click opens the session

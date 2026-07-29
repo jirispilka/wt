@@ -70,6 +70,18 @@ fmt_age() { # seconds -> 42s / 7m / 3h
 # The status vocabulary is written with emoji (they carry color in the plain
 # activity description). stylize() renders it for terminals (ANSI); the widget
 # path maps the same glyphs to semantic levels in compose().
+# OSC 8 on "PR #123", so a wt list row opens the PR on ctrl/cmd-click. Applied
+# to the rendered line and never to $facts itself: finish() writes $facts
+# verbatim into the activity description, where escape codes would show up as
+# garbage in the Meta+Q switcher. Skipped in preview mode too — that text is
+# rendered inside fzf. WT_TTY is set by wt, whose stdout is the real terminal;
+# ours is a capture, so our own isatty() always says no.
+link_pr() {
+    [ "$mode" = plain ] && [ -n "${WT_TTY:-}" ] && [ -n "${pr_url:-}" ] || { cat; return; }
+    local e=$'\033' a=$'\a'
+    sed -E "s|PR (#[0-9]+)|${e}]8;;${pr_url}${a}PR \1${e}]8;;${a}|"
+}
+
 stylize() {
     local G=$'\e[32m' RD=$'\e[31m' Y=$'\e[33m' M=$'\e[35m' C=$'\e[36m' D=$'\e[2m' B=$'\e[1m' R=$'\e[0m'
     sed -E \
@@ -289,7 +301,7 @@ compose() { # <html-body> <verdict> <facts> <icon>
     # and compose()'s jq as well, and this is a footnote, not a verdict.
     [ "$branch" = "$path_branch" ] || facts="${facts:+$facts · }checked out $branch"
     if [ "$mode" = "plain" ] || [ "$mode" = "preview" ]; then
-        printf '%s\n' "$verdict${facts:+$nl$facts}" | stylize
+        printf '%s\n' "$verdict${facts:+$nl$facts}" | stylize | link_pr
     else
         # Fixed skeleton: same rows, same order, dim placeholders — the eye
         # learns positions, states change in place. Identity + verdict on top,
@@ -331,11 +343,12 @@ compose() { # <html-body> <verdict> <facts> <icon>
     exit 0
 }
 
-read_desc_cache() { # -> verdict, facts, icon globals (returns 1 if no cache)
+read_desc_cache() { # -> verdict, facts, icon, pr_url globals (1 if no cache)
     [ -f "$cache_file.desc" ] || return 1
     verdict=$(sed -n 1p "$cache_file.desc")
     facts=$(sed -n 2p "$cache_file.desc")
     icon=$(cat "$cache_file.icon" 2>/dev/null) || icon="git-branch"
+    pr_url=$(cat "$cache_file.url" 2>/dev/null) || pr_url=""
     [ -n "$icon" ] || icon="git-branch"
 }
 
@@ -363,6 +376,8 @@ finish() { # <html-body> <verdict> <facts> <icon> — cache, then emit
     printf '%s' "$1" > "$cache_file"
     printf '%s\n%s' "$2" "$3" > "$cache_file.desc"
     printf '%s' "$4" > "$cache_file.icon"
+    # link_pr needs the URL on cache hits too, and those never reach gh
+    printf '%s' "${pr_url:-}" > "$cache_file.url"
     compose "$1" "$2" "$3" "$4"
 }
 
@@ -390,9 +405,12 @@ if [ -z "$pr_json" ]; then
     finish "$html" "🌱 no PR yet" "$facts" "git-branch"
 fi
 
-me=$(gh api user -q .login 2>/dev/null) || me=""
+pr_url=$(jq -r '.url // ""' <<<"$pr_json")   # link_pr needs it outside the jq below
 
-out=$(jq -r --arg me "$me" '
+# The PR author is always shown by login, never as "mine": your own handle says
+# that already, and dropping the distinction also drops a `gh api user` call
+# from every uncached refresh.
+out=$(jq -r '
     def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
     def cls: (.conclusion // .state // "PENDING");
 
@@ -401,7 +419,6 @@ out=$(jq -r --arg me "$me" '
     ([$checks[] | select(cls | IN("FAILURE","ERROR","CANCELLED","TIMED_OUT","ACTION_REQUIRED","STARTUP_FAILURE"))] | length) as $bad |
     (($checks | length) - $ok - $bad) as $pend |
     ([.reviewRequests[]?] | length) as $waiting |
-    (.author.login == $me) as $mine |
 
     # verdict: the next action for this branch, most urgent condition first
     (if .state == "MERGED" then "🟣 merged — wt remove?"
@@ -420,7 +437,7 @@ out=$(jq -r --arg me "$me" '
      elif $verdict | test("running") then "system-run"
      else "git-branch" end) as $icon |
 
-    ("PR #\(.number) \(if $mine then "mine" else "by \(.author.login | esc)" end)"
+    ("PR #\(.number) \(.author.login | esc)"
         + (if ($checks | length) > 0 then
              " · CI" + (if $bad > 0 then " ❌\($bad)" else "" end)
                      + (if $pend > 0 then " ⏳\($pend)" else "" end)
@@ -430,7 +447,7 @@ out=$(jq -r --arg me "$me" '
 
     # widget rows: label + spans of {text, level, url}. No markup and no manual
     # escaping — the renderer owns the colors, jq owns the quoting.
-    ([{t: "#\(.number)", url: .url}, {t: (if $mine then "mine" else "by \(.author.login)" end)}]
+    ([{t: "#\(.number)", url: .url}, {t: .author.login}]
       + (if .state == "MERGED" then [{t: "merged", level: "info"}]
          elif .state == "CLOSED" then [{t: "closed", level: "error"}]
          elif .reviewDecision == "APPROVED" then [{t: "approved", level: "ok"}]

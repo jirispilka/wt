@@ -24,7 +24,7 @@ wt_config="${XDG_CONFIG_HOME:-$HOME/.config}/wt/config"
 # buys less eliding on both cards; taller only helps the cloud card, whose
 # list grows with the session count — the branch card is a fixed 7 rows.
 : "${WT_CARD_CLOUD:=1240 760}"
-: "${WT_CARD_BRANCH:=1000 340}"
+: "${WT_CARD_BRANCH:=1000 170}"
 
 am="org.kde.ActivityManager"
 amp="/ActivityManager/Activities"
@@ -240,7 +240,15 @@ if [ -n "$session" ]; then
   }
 fi
 
-bold=$'\e[1m' dim=$'\e[2m' green=$'\e[32m' rst=$'\e[0m'
+# Only colorize when the output is a terminal. The per-entry status bodies come
+# pre-colored from wt-status and get stripped further down, but the cloud
+# heading is printed outside that pipeline, so it leaked escapes into `wt list |
+# cat` until these were gated too.
+if [ -t 1 ]; then
+  bold=$'\e[1m' dim=$'\e[2m' green=$'\e[32m' rst=$'\e[0m'
+else
+  bold='' dim='' green='' rst=''
+fi
 
 list_worktrees() {
   # linked worktrees have a .git *file*; branch names may contain slashes
@@ -302,6 +310,11 @@ build_entries() {
 
 case "$cmd" in
 list)
+  # Both producers write into a capture below, so their own isatty() says no.
+  # Only this process knows whether the rendered list reaches a terminal, and
+  # OSC 8 links are worth emitting only if it does. `if`, not `&&`: a false
+  # test as a bare command would trip set -e.
+  if [ -t 1 ]; then export WT_TTY=1; fi
   build_entries
   cur_name=""
   cur=$(qdbus6 "$am" "$amp" "$ami.CurrentActivity" 2>/dev/null) &&

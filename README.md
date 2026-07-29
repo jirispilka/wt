@@ -3,9 +3,8 @@
 `wt add fix/timeout` gives you:
 
 - a git worktree at `~/.worktrees/<repo>/fix/timeout`
-- a KDE Activity `<repo>: fix/timeout` — its desktop a solid color per repo,
-  hue-shifted per branch (turn on *Accent color → From current wallpaper* and
-  the whole UI tints per branch)
+- a KDE Activity `<repo>: fix/timeout` — its name, icon and description are the
+  only Plasma state `wt` writes; your wallpaper is yours
 - wezterm, your IDE and Chrome (dedicated profile; tabs: the branch's PR,
   claude.ai/code, your `WT_URLS`) opened in the worktree and pinned to the
   activity — new windows you open there stay there, which Plasma/Wayland
@@ -139,7 +138,7 @@ cp "$REPO/config.example" ~/.config/wt/config   # then uncomment what you need
 | `WT_DASHBOARD_ACTIVITY` | `Work` | plain activity that gets the cloud-session card |
 | `WT_WINDOW_CLASSES` | `jetbrains-webstorm org.wezfurlong.wezterm google-chrome` | window classes pinned to the new activity — change alongside `WT_IDE` |
 | `WT_CARD_CLOUD` | `1240 760` | cloud card size, `"<width> <height>"` px. Taller shows more sessions (the list scrolls past the bottom) |
-| `WT_CARD_BRANCH` | `1000 340` | branch card size, `"<width> <height>"` px. Wider means less eliding; it's a fixed 7 rows, so extra height is blank |
+| `WT_CARD_BRANCH` | `1000 170` | branch card size, `"<width> <height>"` px. Wider means less eliding; it's a fixed 7 rows, so extra height is blank |
 
 Beyond the config file, in `wt` itself: the `addWidget` block sets widget
 geometry/refresh interval.

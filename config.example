@@ -27,4 +27,4 @@
 # the session count and scrolls past the bottom) — the branch card is a fixed
 # 7 rows, so extra height is just blank space.
 #WT_CARD_CLOUD="1240 760"
-#WT_CARD_BRANCH="1000 340"
+#WT_CARD_BRANCH="1000 170"

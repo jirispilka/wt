@@ -280,13 +280,15 @@ wt_name() { # <worktree-path> -> "<repo>: <branch>" (the activity name)
   echo "$r: $b"
 }
 
-# The numbered entry list shared by list/switch/remove: plain (non-worktree)
-# activities first, then wt worktrees, Personal pinned last.
+# The numbered entry list shared by list/switch/remove: WT_DASHBOARD_ACTIVITY
+# (e.g. Work) pinned first, other plain activities, then wt worktrees, Personal
+# pinned last. qdbus's ListActivities order is otherwise arbitrary (activity
+# creation order), so Work/Personal must be pinned explicitly, not assumed.
 # Fills entry_names[] and entry_paths[] (empty path = plain activity).
 build_entries() {
   entry_names=() entry_paths=()
   local p id name w skip i
-  local wt_paths=() wt_names=() pre=() post=()
+  local wt_paths=() wt_names=() work=() pre=() post=()
   while IFS= read -r p; do
     wt_paths+=("$p")
     wt_names+=("$(wt_name "$p")")
@@ -300,10 +302,11 @@ build_entries() {
     [ -n "$skip" ] && continue
     case "$name" in
     Personal) post+=("$name") ;;
+    "$WT_DASHBOARD_ACTIVITY") work+=("$name") ;;
     *) pre+=("$name") ;;
     esac
   done
-  for name in ${pre[@]+"${pre[@]}"}; do
+  for name in ${work[@]+"${work[@]}"} ${pre[@]+"${pre[@]}"}; do
     entry_names+=("$name")
     entry_paths+=("")
   done

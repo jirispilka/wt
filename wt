@@ -249,10 +249,15 @@ list_worktrees() {
 }
 
 wt_name() { # <worktree-path> -> "<repo>: <branch>" (the activity name)
-  local b r
-  b=$(git -C "$1" branch --show-current 2>/dev/null)
-  r=$(basename "$(dirname "$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")")
-  echo "$r: $b"
+  # The PATH is the join key, never the live checkout. `git checkout` inside a
+  # worktree used to rename the activity out from under wt switch, wt-cloud's
+  # branch->worktree mapping and wt-activity-watch's -d test, splitting one
+  # worktree into two entries — one of which pointed at no activity at all.
+  # Detached HEAD used to produce "<repo>: " for the same reason. This is the
+  # encoding wt-cloud's worktrees() already reads, so now they agree.
+  # Kept a self-contained block: wt-tests.sh sed-extracts /^wt_name()/,/^}/.
+  local rel="${1#"$HOME/.worktrees/"}"
+  printf '%s: %s\n' "${rel%%/*}" "${rel#*/}"
 }
 
 # The numbered entry list shared by list/switch/remove: WT_DASHBOARD_ACTIVITY

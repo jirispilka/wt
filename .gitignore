@@ -19,6 +19,9 @@ npmrc-temp-file
 
 *.tsbuildinfo
 
+# wt-tests.sh imports wt-cloud as a module
+__pycache__/
+
 settings.local*.json
 test/scripts/
 

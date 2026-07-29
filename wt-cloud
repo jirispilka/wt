@@ -240,6 +240,20 @@ LEVEL = {"needs-you": "error", "failed": "error", "working": "ok",
          "your-turn": "warn", "done": "dim"}
 
 
+def pick_head(heads, wt, repos):
+    """(branch, repo-dir-name) for the row: heads repeats one branch under every
+    repo of the session's environment, so the first pair is arbitrary. Prefer a
+    pair we can act on — a branch we already have a worktree for, else a repo we
+    have a clone of. Taking the first pair dropped the action for every session
+    whose first repo happened to be one we had never checked out."""
+    pairs = [(b, r.split("/")[-1]) for r, b in heads]
+    # branch AND repo together: every pair carries the same branch, so matching
+    # on the branch alone would always settle for pairs[0]'s arbitrary repo
+    return next((p for p in pairs if wt.get(p[0]) == p[1]),
+                next((p for p in pairs if p[1] in repos),
+                     pairs[0] if pairs else ("", "")))
+
+
 def cmd_json(_argv):
     """One card for the wt board plasmoid: a row per session, with an action."""
     snap, err = refresh()
@@ -250,8 +264,7 @@ def cmd_json(_argv):
         if s["state"] == "archived" or age(s["updated_at"]) >= MAX_AGE:
             continue
         counts[s["state"]] = counts.get(s["state"], 0) + 1
-        head = next((b for _, b in s["heads"]), "")
-        repo = next((r.split("/")[-1] for r, _ in s["heads"]), "")
+        head, repo = pick_head(s["heads"], wt, repos)
         row = {"state": s["state"].replace("-", " "), "level": LEVEL.get(s["state"], "normal"),
                "age": fmt_age(age(s["updated_at"])), "name": head or repo or "?",
                "note": s["needs_action"] or s["detail"] or "", "url": s["url"]}

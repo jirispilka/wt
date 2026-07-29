@@ -21,6 +21,12 @@ t "empty rejected" "1"  "$(norm_session "" >/dev/null; echo $?)"
 # keep in sync with the scan() in wt-status's jq program
 scan='https://claude\\.ai/code/session_[A-Za-z0-9_-]+'
 body() { jq -rn --arg b "$1" "((\$b | [scan(\"$scan\")] | last) // \"\")"; }
+# the activity join key comes from the worktree PATH, so a checkout inside the
+# worktree cannot rename the activity; branches keep their slashes
+eval "$(sed -n '/^wt_name()/,/^}/p' wt)"
+t "wt_name flat"    "repo: main"     "$(wt_name "$HOME/.worktrees/repo/main")"
+t "wt_name slashes" "repo: feat/a/b" "$(wt_name "$HOME/.worktrees/repo/feat/a/b")"
+
 t "pr body link"   "$u" "$(body "closes #12
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
@@ -73,6 +79,18 @@ t("archived",   "archived",  m.normalize(sess(status="archived", worker="running
 t("api id form", "https://claude.ai/code/session_01AbC",
   m.normalize({"id": "cse_01AbC"})["url"])
 t("missing config", [], m.normalize({"id": "cse_x"})["heads"])
+# pick_head: one branch is listed under every repo of the session's environment,
+# so the row must pick the pair we can act on, not heads[0]
+multi = [["apify/apify-mcp-server", "claude/foo"],
+         ["apify/apify-mcp-server-internal", "claude/foo"],
+         ["apify/shepherd", "claude/foo"]]
+t("pick_head clone", ("claude/foo", "apify-mcp-server-internal"),
+  m.pick_head(multi, {}, {"apify-mcp-server-internal": "/p"}))
+t("pick_head worktree", ("claude/foo", "apify-mcp-server-internal"),
+  m.pick_head(multi, {"claude/foo": "apify-mcp-server-internal"}, {}))
+t("pick_head neither", ("claude/foo", "apify-mcp-server"), m.pick_head(multi, {}, {}))
+t("pick_head empty", ("", ""), m.pick_head([], {}, {}))
+
 t("ssh remote",  "apify/apify-mcp-server", m.slug("git@github.com:apify/apify-mcp-server.git"))
 t("https remote", "apify/apify-mcp-server", m.slug("https://github.com/apify/apify-mcp-server"))
 t("junk remote",  "", m.slug("nonsense"))

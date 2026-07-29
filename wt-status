@@ -30,9 +30,18 @@ ami="org.kde.ActivityManager.Activities"
 # description; the widget keeps it fresh anyway.
 repo_name=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")")
 
+# The activity is keyed by the worktree PATH, not by $branch above: a git
+# checkout inside the worktree must not orphan its activity (see wt's wt_name).
+# $branch still drives the PR/CI/cloud lookups below — that is the work you are
+# actually doing here, and it is worth saying so when the two disagree.
+wt_rel="${path#"$HOME/.worktrees/"}"
+path_branch="${wt_rel#*/}"
+subtitle="$repo_name"
+[ "$branch" = "$path_branch" ] || subtitle="$repo_name · worktree is $path_branch"
+
 activity_id=""
 if [ "$mode" != "preview" ] && [ "$mode" != "plain" ]; then
-    act_name="$repo_name: $branch"
+    act_name="${wt_rel%%/*}: $path_branch"
     for id in $(qdbus6 "$am" "$amp" "$ami.ListActivities" 2>/dev/null); do
         if [ "$(qdbus6 "$am" "$amp" "$ami.ActivityName" "$id" 2>/dev/null)" = "$act_name" ]; then
             activity_id="$id"
@@ -272,6 +281,13 @@ compose() { # <html-body> <verdict> <facts> <icon>
         1) facts="${facts:+$facts · }$agent_status" ;;
     esac
     facts="$facts${local_status:+ · $local_status}"
+    # Everything above is about $branch, the live checkout, but wt list labels
+    # the row with the worktree's path branch — so name the live one here, or
+    # the PR shown looks like it belongs to a branch it does not. (The card does
+    # the mirror image: its title is $branch, so $subtitle names the worktree.)
+    # Plain text on purpose: a new emoji status would mean touching stylize()
+    # and compose()'s jq as well, and this is a footnote, not a verdict.
+    [ "$branch" = "$path_branch" ] || facts="${facts:+$facts · }checked out $branch"
     if [ "$mode" = "plain" ] || [ "$mode" = "preview" ]; then
         printf '%s\n' "$verdict${facts:+$nl$facts}" | stylize
     else
@@ -281,7 +297,7 @@ compose() { # <html-body> <verdict> <facts> <icon>
         # RichText, so tables align for free; the applet sizes to this content).
         # Levels, not colors: the widget resolves them against the Plasma theme.
         # jq does all the quoting.
-        jq -cn --arg branch "$branch" --arg repo "$repo_name" \
+        jq -cn --arg branch "$branch" --arg repo "$subtitle" \
             --arg verdict "$verdict" --arg agent "$agent_status" \
             --arg localtxt "$local_plain" --arg url "$session_url" \
             --argjson rows "${html:-[]}" '

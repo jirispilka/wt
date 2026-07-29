@@ -191,9 +191,68 @@ local copy of the desktop file (`~/.local/share/applications/`) — a plain
 | `completions/_wt` | zsh tab completion (subcommands, branches, removable worktrees) |
 | `kwin/wt-activity-bind/` | KWin script: bind new windows to the current activity |
 
+## What wt writes to KDE, and how to undo it
+
+`wt` is a desktop tool, so it does mutate Plasma state. This is the complete
+list — if it is not here, `wt` does not write it.
+
+| What | Written by | Lands in | Undo |
+|---|---|---|---|
+| Activity: created, named `<repo>: <branch>`, icon `git-branch`, description = the status line | `wt add`, `wt-status`, `wt-activity-watch` | `~/.config/kactivitymanagerdrc` | `wt remove`, or `qdbus6 org.kde.ActivityManager /ActivityManager/Activities RemoveActivity <id>` |
+| Current activity switched | `wt add`, `wt switch` | runtime only | switch back |
+| One `org.kde.wt.board` widget on the activity's desktop, with its command + refresh interval | `install_board` (`wt add`, `wt dashboard`) | `~/.config/plasma-org.kde.plasma.desktop-appletsrc` | right-click the card → Remove Widget, or the one-liner below |
+| New windows pinned to the activity: a throwaway KWin script `wt-assign-<activity-id>` | `wt add` | runtime only — self-unloads after 120s | `qdbus6 org.kde.KWin /Scripting unloadScript wt-assign-<activity-id>` |
+| `wt-activity-bind` KWin script (install step 5, permanent) | you, at install | `~/.local/share/kwin/scripts/`, enabled in `~/.config/kwinrc` | System Settings → Window Management → KWin Scripts → untick |
+| `Meta+1..6` launchers (install step 8, permanent) | you, at install | `~/.local/share/applications/wt-switch-*.desktop`, `~/.config/kglobalshortcutsrc` | delete those `.desktop` files, unbind in System Settings |
+
+Remove every wt card from one activity:
+
+```bash
+qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript '
+var ds = desktopsForActivity("<activity-id>");
+for (var i = 0; i < ds.length; i++) {
+    var ws = ds[i].widgets("org.kde.wt.board");
+    for (var j = 0; j < ws.length; j++) ws[j].remove();
+}'
+```
+
+**`wt` never writes the wallpaper.** Older versions set `wallpaperPlugin =
+org.kde.color` plus a per-repo color. Avoid that plugin: its `config.qml` in
+plasma-workspace 6.6.5 does not declare the `configDialog` /
+`wallpaperConfiguration` properties that `kcm_wallpaper` assigns
+unconditionally, so **the wallpaper config UI stops opening** — from the desktop
+context menu and System Settings alike — for any containment set to it. If you
+are stuck there, put the containment back on an image plugin:
+
+```bash
+qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript '
+var ds = desktopsForActivity("<activity-id>");
+for (var i = 0; i < ds.length; i++)
+    if (ds[i].wallpaperPlugin === "org.kde.color") ds[i].wallpaperPlugin = "org.kde.image";'
+```
+
+Two more Plasma traps worth knowing, neither of them wt's doing:
+
+- **A black desktop is usually `DynamicMode`.** In the `org.kde.image` plugin,
+  `DynamicMode=2` means "only use the light image" and `3` means "only use the
+  dark one" — but which image that *is* comes from a `#light` / `#dark` /
+  `#day-night` fragment on the URL. Point it at a plain wallpaper package with
+  no such fragment and it renders **black**. Fix: set the key back to `0`.
+- **A widget keeps the geometry it was created with.** `install_board` therefore
+  resizes by removing and re-adding, preserving the old position — so if a card
+  sits near a screen edge, the new size gets clamped to whatever room is left,
+  and repeated runs can walk it across the screen. Drag it to the top-left, or
+  remove it with the snippet above, then re-run `wt dashboard`.
+
+Config changes only take effect once Plasma reloads: `systemctl --user restart
+plasma-plasmashell` (then `wt dashboard` to re-place the cards). **A logout is
+never needed.** Editing `plasma-org.kde.plasma.desktop-appletsrc` by hand while
+plasmashell is running does not work — it rewrites the file on exit and your
+edit is lost. Go through the scripting API, as above.
+
 ## Notes
 
-- `add` is idempotent: re-running repairs color/widget and reuses the
+- `add` is idempotent: re-running repairs the widget and reuses the
   worktree/branch/activity (existing local branch is checked out; branch
   existing only on origin becomes a tracking branch, so pushes update its PR).
 - `add` never invents a branch — like git, that needs `-b`. If origin cannot be

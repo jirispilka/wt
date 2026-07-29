@@ -139,9 +139,11 @@ cp "$REPO/config.example" ~/.config/wt/config   # then uncomment what you need
 | `WT_DASHBOARD_ACTIVITY` | `Work` | plain activity that gets the cloud-session card |
 | `WT_WINDOW_CLASSES` | `jetbrains-webstorm org.wezfurlong.wezterm google-chrome` | window classes pinned to the new activity — change alongside `WT_IDE` |
 
-Beyond the config file, in `wt` itself: `repo_color()` pins a hex color per
-repo (fallback: hash-picked palette), and the `addWidget` block sets widget
+Beyond the config file, in `wt` itself: the `addWidget` block sets widget
 geometry/refresh interval.
+
+`wt` does not set the desktop wallpaper. The activity name, icon and
+description are the only KDE state it owns.
 
 Recommended wezterm extra — fresh windows open in the current activity's
 worktree. Add to `~/.wezterm.lua`:

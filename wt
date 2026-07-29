@@ -184,39 +184,6 @@ find_activity() {
   done
 }
 
-# Shift the repo base color's hue by up to ±20° per branch, so activities of the
-# same repo stay in one color family but are distinguishable.
-branch_tint() { # <base-hex> <branch-name>
-  command -v python3 >/dev/null 2>&1 || {
-    echo "$1"
-    return
-  }
-  python3 - "$1" "$2" <<'EOF'
-import sys, colorsys, zlib
-base, branch = sys.argv[1], sys.argv[2]
-r, g, b = (int(base[i:i + 2], 16) / 255 for i in (1, 3, 5))
-h, l, s = colorsys.rgb_to_hls(r, g, b)
-shift = (zlib.crc32(branch.encode()) % 41 - 20) / 360
-r, g, b = colorsys.hls_to_rgb((h + shift) % 1, l, s)
-print('#%02x%02x%02x' % tuple(round(c * 255) for c in (r, g, b)))
-EOF
-}
-
-# Solid wallpaper color per repo; with "Accent color: from wallpaper" the UI follows.
-repo_color() {
-  case "$1" in
-  apify-mcp-server) echo "#2e6fb7" ;;          # blue
-  apify-mcp-server-internal) echo "#7d3fa8" ;; # purple
-  apify-core) echo "#c26a1d" ;;                # apify orange
-  *)
-    local palette=("#2d7d6e" "#8a5a2b" "#5e7d2d" "#7d2d4f" "#2d5a7d" "#4a2d7d")
-    local sum
-    sum=$(printf %s "$1" | cksum | cut -d' ' -f1)
-    echo "${palette[sum % ${#palette[@]}]}"
-    ;;
-  esac
-}
-
 [ $# -ge 1 ] || usage
 cmd="$1"
 shift
@@ -622,23 +589,11 @@ add)
   fi
   qdbus6 "$am" "$amp" "$ami.SetCurrentActivity" "$activity_id"
 
-  # per-repo wallpaper color for the activity's desktop; plasma creates the
-  # desktop containment lazily for a brand-new activity, so poll until it exists
-  wall_color="$(branch_tint "$(repo_color "$repo_name")" "$branch")"
-  applied=0
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    applied=$(qdbus6 org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell.evaluateScript "
-            var ds = desktopsForActivity(\"$activity_id\");
-            for (var i = 0; i < ds.length; i++) {
-                ds[i].wallpaperPlugin = \"org.kde.color\";
-                ds[i].currentConfigGroup = [\"Wallpaper\", \"org.kde.color\", \"General\"];
-                ds[i].writeConfig(\"Color\", \"$wall_color\");
-            }
-            print(ds.length);")
-    [ "${applied:-0}" != "0" ] && break
-    sleep 0.5
-  done
-  [ "${applied:-0}" != "0" ] || echo "warning: activity desktop never appeared, wallpaper color not set"
+  # wt does not touch the desktop wallpaper. It used to set a per-repo solid
+  # color via the org.kde.color plugin, whose config.qml (plasma-workspace
+  # 6.6.5) never declares configDialog/wallpaperConfiguration — so kcm_wallpaper
+  # threw on it and the wallpaper config UI stopped opening for the containment.
+  # The activity name, icon and description are the only KDE state wt owns.
 
   # branch-status card on the activity desktop; idempotent, see install_board
   install_board "$activity_id" "$script_dir/wt-status $worktree_path" \

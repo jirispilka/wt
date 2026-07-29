@@ -86,8 +86,11 @@ blank the widget. Keep that.
 
 **KDE plumbing quirks** (all in `wt`): a desktop applet's geometry is read-only through the
 scripting API, so `install_board()` resizes by removing and re-adding the widget at the old
-coordinates (which can legitimately be negative). A brand-new activity has no desktop
-containment until Plasma creates one, hence the polling loop around the wallpaper color.
+coordinates (which can legitimately be negative). **`wt` never writes the wallpaper**: it
+used to set a per-repo solid color via `org.kde.color`, whose `config.qml` (plasma-workspace
+6.6.5) omits the `configDialog`/`wallpaperConfiguration` properties `kcm_wallpaper` assigns
+unconditionally — so the wallpaper config UI died on any containment wt had touched. Activity
+name, icon and description are the only KDE state wt owns; keep it that way.
 Windows are pinned to an activity by a throwaway KWin script that self-unloads after 120s,
 because Wayland ties new windows to the launching terminal instead. `wt remove` runs its
 window-close + activity-removal tail detached via `setsid`, since it may be closing the

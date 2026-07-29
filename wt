@@ -542,7 +542,14 @@ fi
 repo_dir="$(git -C "$repo_dir" rev-parse --show-toplevel)"
 repo_name="$(basename "$repo_dir")"
 [ -n "$worktree_path" ] || worktree_path="$HOME/.worktrees/$repo_name/$branch"
-activity_name="$repo_name: $branch"
+# The activity name is path-derived (wt_name), like everywhere else — never the
+# live checkout. `git checkout` inside a worktree otherwise made `wt remove`
+# look for "<repo>: <checked-out-branch>", an activity that never existed, and
+# leave the real one orphaned with no worktree to remove it by.
+case "$worktree_path" in
+"$HOME/.worktrees/"*) activity_name="$(wt_name "$worktree_path")" ;;
+*) activity_name="$repo_name: $branch" ;; # remove from a worktree elsewhere
+esac
 
 case "$cmd" in
 add)

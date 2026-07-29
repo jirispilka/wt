@@ -99,7 +99,7 @@ def normalize(s):
     sid = s.get("id") or ""
     # the web URL uses a session_ prefix over the same id body as the api's cse_
     suffix = sid.split("_", 1)[-1]
-    # pushed branches (outcomes) are authoritative; sources only give the repo
+    # pushed branches (outcomes) are authoritative; sources only e the repo
     heads, repos = [], []
     for o in cfg.get("outcomes") or []:
         gi = o.get("git_info") or {}

@@ -27,6 +27,17 @@ eval "$(sed -n '/^wt_name()/,/^}/p' wt)"
 t "wt_name flat"    "repo: main"     "$(wt_name "$HOME/.worktrees/repo/main")"
 t "wt_name slashes" "repo: feat/a/b" "$(wt_name "$HOME/.worktrees/repo/feat/a/b")"
 
+# the per-repo marker: same repo -> same slot forever (no state anywhere), and
+# an explicit WT_REPO_MARKS entry beats the hash
+eval "$(sed -n '/^repo_mark()/,/^}/p' wt)"
+mark() { IFS=$'\t' read -r e a i <<<"$(repo_mark "$1")"; printf '%s %s %s\n' "$e" "$a" "$i"; }
+t "mark stable"     "$(WT_REPO_MARKS= mark wt)" "$(WT_REPO_MARKS= mark wt)"
+t "mark in palette" "1" \
+  "$(WT_REPO_MARKS= mark wt | grep -cE '^(.) (203|215|221|114|75|141|137|245) folder-(red|orange|yellow|green|blue|violet|brown|grey)$')"
+t "mark override"   "🟢 114 folder-green" "$(WT_REPO_MARKS="wt:green" mark wt)"
+t "mark emoji"      "🌳 114 folder-green" "$(WT_REPO_MARKS="other:red wt:green:🌳" mark wt)"
+t "mark bad color"  "$(WT_REPO_MARKS= mark wt)" "$(WT_REPO_MARKS="wt:puce" mark wt)"
+
 t "pr body link"   "$u" "$(body "closes #12
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

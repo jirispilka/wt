@@ -13,11 +13,13 @@ script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # optional user config (see config.example); the file wins, defaults below fill the rest
 wt_config="${XDG_CONFIG_HOME:-$HOME/.config}/wt/config"
 [ -r "$wt_config" ] && . "$wt_config"
+: "${WT_REPOS:=}"                  # parent dirs searched for a bare repo name
 : "${WT_IDE:=webstorm}"            # run as: $WT_IDE <worktree-path>
 : "${WT_CHROME_PROFILE:=Default}"  # Chrome --profile-directory value
 : "${WT_URLS:=}"                   # extra Chrome tabs, space-separated
 : "${WT_DASHBOARD_ACTIVITY:=Work}" # where 'wt dashboard' puts the cloud card
 : "${WT_WINDOW_CLASSES:=jetbrains-webstorm org.wezfurlong.wezterm google-chrome}"
+: "${WT_REPO_MARKS:=}"             # pin a repo color: "<repo>:<color>[:<emoji>]" …
 # Card sizes, "<width> <height>" in pixels, passed to addWidget unquoted. A
 # desktop applet is sized once at creation and never resizes to its content
 # (see plasmoid/…/ui/main.qml), so these numbers are the whole layout. Wider
@@ -34,8 +36,8 @@ kwins="/Scripting"
 kwini="org.kde.kwin.Scripting"
 
 usage() {
-  echo "usage: wt add [repo-dir] <branch> | -b <new-branch> [base] | <session-id>" >&2
-  echo "       wt remove [-f] [[repo-dir] <branch-name> | <number>]" >&2
+  echo "usage: wt add [repo] <branch> | -b <new-branch> [base] | <session-id>" >&2
+  echo "       wt remove [-f] [[repo] <branch-name> | <number>]" >&2
   echo "       wt list | wt switch [number] | wt cloud | wt dashboard [activity]" >&2
   echo "run 'wt --help' for details" >&2
   exit 1
@@ -46,104 +48,72 @@ help() {
 wt — one git worktree = one KDE Activity (wezterm + IDE + Chrome)
 
 USAGE
-  wt add [repo-dir] <branch-name> [--session <url|id>]
-  wt add [repo-dir] -b <new-branch> [base-branch]
-  wt add [repo-dir] <session-id|claude.ai/code url>
-  wt remove [-f] [[repo-dir] <branch-name> | <number>]
-  wt list
-  wt switch [number]
-  wt cloud [--all]
-  wt dashboard [activity-name]
-  wt --help
+  wt add [repo] <branch> [--session <url|id>]     worktree + activity, switch to it
+  wt add [repo] -b <branch> [base]                create the branch first
+  wt add [repo] <session-id|claude.ai/code url>   branch comes from that session
+  wt remove [-f] [[repo] <branch> | <number>]     windows, worktree, branch, activity
+  wt list                                         numbered entries + cloud sessions
+  wt switch [number]                              fzf picker, or jump to entry n
+  wt cloud [--all]                                claude.ai/code sessions, urgent first
+  wt dashboard [activity]                         (re)install every board card
 
-  repo-dir defaults to the repo containing the current directory.
-  It is recognized by containing a .git entry.
+  repo defaults to the repo containing $PWD; else a path holding .git, or a bare
+  repo name found under $WT_REPOS. The worktree is ~/.worktrees/<repo>/<branch>,
+  the activity "<repo>: <branch>". add is idempotent: re-running reuses both.
 
 ADD
-  Creates a worktree at ~/.worktrees/<repo>/<branch>, creates a KDE Activity
-  named "<repo>: <branch>" (desktop colored by repo), switches to it, and opens
-  wezterm, your IDE ($WT_IDE), and Chrome pinned to that activity.
-  Chrome opens the branch's open PR, else the branch on GitHub, else the repo.
+  Opens wezterm, $WT_IDE and Chrome pinned to the new activity. Chrome gets the
+  branch's PR, else the branch on GitHub, else the repo — plus the tied session.
 
-  Branch resolution (git-like: a branch is only born with -b):
-    exists locally     -> checked out into the worktree
-    exists on origin   -> local tracking branch created (push updates the PR)
-    otherwise          -> refused, with the -b command to run
-    -b <new-branch>    -> created from base-branch (default: the main
-                          checkout's current HEAD); refused if it exists
+  Branch resolution is git-like, a branch is only born with -b:
+    exists locally    -> checked out
+    on origin only    -> tracking branch created (push updates the PR)
+    neither           -> refused, with the -b line to run
+    -b <branch>       -> created off base (default: the main checkout's HEAD),
+                         refused if it already exists
 
-  Given a session id (session_…, cse_…, or a claude.ai/code URL) instead of a
-  branch, the branch is whatever that session pushed, and the worktree is tied
-  to it. Fails if the session has not pushed a branch yet.
-
-  Idempotent: re-running reuses the existing worktree/branch/activity.
-
-  --session <url|id>: tie the worktree to a claude.ai/code session (the one you
-  started on the web and are now continuing locally). Chrome opens that session
-  instead of the session list, and wt list / the widget show a clickable ☁ link.
-  Stored per-worktree, so re-running 'wt add <branch> --session …' sets it later.
-  For a branch whose PR body already links its session, wt-status finds it by
-  itself — no flag needed.
+  A session id (session_…, cse_…) or claude.ai/code URL in place of the branch
+  uses the branch that session works on and ties the worktree to it — if the
+  session never pushed it, the branch is created here so you can carry on.
+  --session <url|id> ties a session to a worktree after the fact. Not needed
+  when the PR body links it: wt-status finds that by itself.
 
 REMOVE
-  Closes the activity's windows (graceful; unsaved-changes dialogs survive),
-  removes the worktree, deletes the branch (only if merged; warns otherwise),
-  and removes the activity.
+  Windows close gracefully (unsaved-changes dialogs survive); the branch is
+  deleted only if merged. No arguments: run it inside the worktree. A branch
+  name is resolved across ~/.worktrees, a number is a wt-list entry.
+  -f: remove a dirty worktree and delete an unmerged branch (squash-merged PRs
+  always look unmerged to git). Both throw work away.
 
-  With no arguments, run from inside a worktree: repo and branch are inferred.
-  A branch name works from anywhere (resolved across ~/.worktrees); a number
-  picks the wt-list entry.
-
-  -f / --force: remove even with uncommitted changes, and delete the branch
-  even if unmerged (squash-merged PRs always look unmerged to git). Careful:
-  both throw work away.
-
-LIST
-  Numbered entries: plain activities first (e.g. Work), then every worktree
-  under ~/.worktrees with coding-agent (claude/codex), PR, CI, and review
-  status, Personal last. ● marks the current activity. The numbers feed
-  'wt switch <n>' and 'wt remove <n>'.
-
-  Ends with a 'cloud elsewhere' block: active claude.ai/code sessions whose
-  branch has no worktree here (the ones with a worktree show up as that row's
-  cloud chip instead).
+LIST / SWITCH
+  Numbered: $WT_DASHBOARD_ACTIVITY first, other plain activities, then every
+  worktree with agent (claude/codex), PR, CI and review status, Personal last;
+  ● is current. The numbers feed 'wt switch <n>' and 'wt remove <n>'
+  (Meta+1..4 are bound to entries 1-4). The trailing 'cloud elsewhere' block is
+  the sessions with no worktree here — the rest show up as a row's cloud chip.
 
 CLOUD
-  Recent claude.ai/code sessions: 'needs you' (a live prompt) first, then
-  failed, working, 'your turn' (the last turn ended on a question) and done —
-  with the pushed branch, its age, and the one-line note the session left.
-  Branch names are OSC-8 links: ctrl-click opens the session. Idle >48h is
-  hidden; --all shows everything. Read-only, so you never have to open the
-  browser to see where things stand.
+  Recent sessions, 'needs you' (a live prompt) first, then failed, working,
+  'your turn' (last turn ended on a question), done — with branch, age and the
+  note the session left. Branches are OSC-8 links: ctrl-click opens the session.
+  Idle >7d is hidden, --all shows everything. Read-only.
 
 DASHBOARD
-  Installs or repairs every wt board card: the cloud session list on one plain
-  activity (default $WT_DASHBOARD_ACTIVITY, pass another name explicitly) plus a
-  branch card on each worktree activity. Use it after changing the widget, or to
-  fix a card without reopening the whole workspace the way 'wt add' does.
-  Each card is recreated in place — a desktop applet cannot be resized through
-  the scripting API, only replaced — so its position is kept but a manual resize
-  is not. An activity must have been visited once, or Plasma has not created its
-  desktop yet.
+  Cloud card on one plain activity, branch card on every worktree activity.
+  Cards are recreated, so position survives but a manual resize does not (a
+  desktop applet cannot be resized through the scripting API). An activity needs
+  to have been visited once, or Plasma has not created its desktop yet.
 
-SWITCH
-  fzf picker over the same entries; Enter switches to the activity.
-  'wt switch <n>' skips the picker and jumps straight to entry n from
-  wt list (Meta+1..4 are bound to entries 1-4).
-
-CONFIG
-  ~/.config/wt/config (plain shell, all optional — see config.example):
-  WT_IDE, WT_CHROME_PROFILE, WT_URLS, WT_DASHBOARD_ACTIVITY, WT_WINDOW_CLASSES,
-  WT_CARD_CLOUD, WT_CARD_BRANCH.
+CONFIG  ~/.config/wt/config, plain shell, all optional — see config.example
+  WT_REPOS WT_IDE WT_CHROME_PROFILE WT_URLS WT_DASHBOARD_ACTIVITY
+  WT_WINDOW_CLASSES WT_CARD_CLOUD WT_CARD_BRANCH WT_REPO_MARKS
 
 EXAMPLES
   wt add fix/timeout                       # existing branch, local or on origin
-  wt add -b fix/timeout                    # new branch off the current HEAD
-  wt add -b fix/timeout master             # new branch based on master
-  wt add session_01GaQ7VgYvm3m865aY4HEWbE  # whatever that cloud session pushed
-  wt add ~/apify/apify-core fix/timeout    # from anywhere
+  wt add -b fix/timeout master             # new branch off master
+  wt add apify-core fix/timeout            # bare repo name, found via $WT_REPOS
+  wt add session_01GaQ7VgYvm3m865aY4HEWbE  # the branch that session works on
   wt remove                                # from inside the worktree
-  wt remove ~/apify/apify-core fix/timeout # from anywhere
 EOF
   exit 0
 }
@@ -153,7 +123,7 @@ EOF
 # <activity-id> <command> <replaced-command-match> <w> <h> <interval-ms>
 install_board() {
   if [ ! -d "$HOME/.local/share/plasma/plasmoids/org.kde.wt.board" ]; then
-    echo "wt: board plasmoid not installed — see wt-README (Install)" >&2
+    echo "wt: board plasmoid not installed — see the README (Install)" >&2
     return 1
   fi
   # A desktop applet keeps the geometry it was created with — Widget.geometry
@@ -214,7 +184,7 @@ norm_session() { # <claude.ai/code url | session_… | cse_… id> -> canonical 
 # -f/--force (remove only): force dirty-worktree removal + unmerged-branch deletion
 # -b (add only): create the branch, like git checkout -b
 # --session (add only): the claude.ai/code session this worktree continues
-force="" session="" newbranch=""
+force="" session="" newbranch="" from_session=""
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -226,6 +196,13 @@ while [ $# -gt 0 ]; do
     shift
     ;;
   --session=*) session="${1#*=}" ;;
+  # branch names and repo dirs never start with '-', so an unknown dash arg is a
+  # typo — silently treating it as a positional made 'wt add -b x --session-id y'
+  # take "--session-id" as the base branch and fail deep inside git instead.
+  -*)
+    echo "wt: unknown option '$1'" >&2
+    usage
+    ;;
   *) args+=("$1") ;;
   esac
   shift
@@ -266,6 +243,37 @@ wt_name() { # <worktree-path> -> "<repo>: <branch>" (the activity name)
   # Kept a self-contained block: wt-tests.sh sed-extracts /^wt_name()/,/^}/.
   local rel="${1#"$HOME/.worktrees/"}"
   printf '%s: %s\n' "${rel%%/*}" "${rel#*/}"
+}
+
+repo_mark() { # <repo> -> "<emoji>\t<ansi-256>\t<icon>" — one slot, three renderings
+  # Repos are told apart by color, and the same slot has to survive three very
+  # different renderers: the ANSI tint in `wt list`, the Breeze folder-<color>
+  # icon in the activity switcher (the activity NAME is the join key, so a
+  # marker cannot go there), and the circle emoji — which is what is left once
+  # `wt list | cat` strips the escapes. Hence one palette, not three.
+  # The slot comes from the name itself, so it is stable forever with no state
+  # to keep; WT_REPO_MARKS ("<repo>:<color>[:<emoji>]" …) overrides a repo.
+  # Kept a self-contained block: wt-tests.sh sed-extracts /^repo_mark()/,/^}/.
+  local palette=(red:203:🔴 orange:215:🟠 yellow:221:🟡 green:114:🟢
+    blue:75:🔵 violet:141:🟣 brown:137:🟤 grey:245:⚪)
+  local entry rest want="" emoji="" slot=""
+  for entry in ${WT_REPO_MARKS:-}; do
+    case "$entry" in
+    "$1":*)
+      rest="${entry#*:}" want="${rest%%:*}"
+      # a two-field entry picks the color only, and keeps the slot's circle
+      [ "$rest" = "$want" ] || emoji="${rest#*:}"
+      ;;
+    esac
+  done
+  for entry in "${palette[@]}"; do
+    [ "${entry%%:*}" = "$want" ] && slot="$entry"
+  done
+  if [ -z "$slot" ]; then # unset, or a color name that is not in the palette
+    slot="${palette[$(printf '%s' "$1" | cksum | cut -d" " -f1) % ${#palette[@]}]}"
+  fi
+  rest="${slot#*:}"
+  printf '%s\t%s\tfolder-%s\n' "${emoji:-${rest#*:}}" "${rest%%:*}" "${slot%%:*}"
 }
 
 # The numbered entry list shared by list/switch/remove: WT_DASHBOARD_ACTIVITY
@@ -314,7 +322,9 @@ list)
   # Only this process knows whether the rendered list reaches a terminal, and
   # OSC 8 links are worth emitting only if it does. `if`, not `&&`: a false
   # test as a bare command would trip set -e.
-  if [ -t 1 ]; then export WT_TTY=1; fi
+  # Same reason wt-cloud cannot measure the width it renders into and assumes a
+  # narrow one — which cost the note its room once the title moved in.
+  if [ -t 1 ]; then export WT_TTY=1 COLUMNS="$(tput cols 2>/dev/null || echo 100)"; fi
   build_entries
   cur_name=""
   cur=$(qdbus6 "$am" "$amp" "$ami.CurrentActivity" 2>/dev/null) &&
@@ -327,14 +337,22 @@ list)
     [ -n "${entry_paths[i]}" ] && "$script_dir/wt-status" "${entry_paths[i]}" plain >"$tmp/$i" &
   done
   wait
-  # bold branch, dim repo, status folded onto one line; ANSI is stripped
-  # when stdout is not a terminal (the status arrives pre-colored)
+  # bold branch, repo in its own per-repo color, status folded onto one line;
+  # ANSI is stripped when stdout is not a terminal (the status arrives
+  # pre-colored) — which is why the repo also carries repo_mark's emoji, the
+  # half of the marker that survives the strip.
   for i in "${!entry_names[@]}"; do
     name="${entry_names[i]}"
     mark="  "
     [ "$name" = "$cur_name" ] && mark="$green●$rst "
     if [ -n "${entry_paths[i]}" ]; then
-      printf '%2d %s%s%s%s %s%s%s\n' "$((i + 1))" "$mark" "$bold" "${name#*: }" "$rst" "$dim" "${name%%: *}" "$rst"
+      IFS=$'\t' read -r r_emoji r_ansi _ <<<"$(repo_mark "${name%%: *}")"
+      # not [ -t 1 ]: this loop runs inside the strip pipeline below, so its
+      # own stdout is never the terminal. $rst was gated up top, where it was.
+      r_color=""
+      [ -n "$rst" ] && r_color=$'\e[38;5;'"$r_ansi"m
+      printf '%2d %s%s%s%s %s%s %s%s\n' "$((i + 1))" "$mark" "$bold" "${name#*: }" "$rst" \
+        "$r_color" "$r_emoji" "${name%%: *}" "$rst"
       body=""
       while IFS= read -r l; do
         body="${body:+$body $dim·$rst }$l"
@@ -385,6 +403,11 @@ dashboard)
     [ -n "${entry_paths[i]}" ] || continue
     id="$(find_activity "${entry_names[i]}")"
     [ -n "$id" ] || continue
+    # repaint the repo-color icon too: it is set on 'add', so a worktree
+    # activity created before repo_mark existed (or added before a
+    # WT_REPO_MARKS edit) only picks up the current color here
+    IFS=$'\t' read -r _ _ repo_icon <<<"$(repo_mark "${entry_names[i]%%: *}")"
+    qdbus6 "$am" "$amp" "$ami.SetActivityIcon" "$id" "$repo_icon" || true
     install_board "$id" "$script_dir/wt-status ${entry_paths[i]}" \
       wt-status $WT_CARD_BRANCH 5000 >/dev/null && echo "branch card on '${entry_names[i]}'"
   done
@@ -442,13 +465,24 @@ switch)
   ;;
 esac
 
-# Optional repo-dir: recognized by containing .git (branch names never do).
+# Optional repo-dir: recognized by containing .git (branch names never do), or
+# by naming a repo under $WT_REPOS — 'wt add apify-mcp-server fix/x' from
+# anywhere. The bare-name form needs a second argument, so a lone branch that
+# happens to share a repo's name is still read as a branch.
 repo_dir="$PWD"
 explicit_repo=""
 if [ $# -ge 1 ] && [ -e "$1/.git" ]; then
   repo_dir="$1"
   explicit_repo=1
   shift
+elif [ $# -ge 2 ]; then
+  for d in $WT_REPOS; do # unquoted: space-separated list
+    [ -e "$d/$1/.git" ] || continue
+    repo_dir="$d/$1"
+    explicit_repo=1
+    shift
+    break
+  done
 fi
 branch="${1:-}"
 base="${2:-}"
@@ -468,17 +502,20 @@ if [ -z "$branch" ] && [ -n "$session" ]; then
   branch=$("$script_dir/wt-cloud" branch "$session" \
     "$(git -C "$repo_dir" remote get-url origin 2>/dev/null)") || branch=""
   if [ -z "$branch" ]; then
-    echo "wt: no branch for $session — has that session pushed anything yet?" >&2
+    echo "wt: $session has no branch yet — give it something to work on first" >&2
     exit 1
   fi
   case "$branch" in *"
 "*)
-    echo "wt: that session pushed several branches, pick one:" >&2
+    echo "wt: that session has several branches, pick one:" >&2
     printf '  %s\n' $branch >&2
     exit 1
     ;;
   esac
   echo "session branch: $branch"
+  # the API reports the branch the session made in its own sandbox, pushed or
+  # not — so a missing branch here means "not pushed yet", not "typo"
+  from_session=1
 fi
 
 worktree_path=""
@@ -539,7 +576,17 @@ if [ "$cmd" = remove ] && [ -n "$branch" ] && [ -z "$explicit_repo" ] && [ -z "$
   fi
 fi
 
-repo_dir="$(git -C "$repo_dir" rev-parse --show-toplevel)"
+# A repo-dir argument is only recognized as one if it holds a .git entry, so a
+# bare repo name lands here as a branch and $PWD stays the repo — say that,
+# instead of letting git's bare "fatal: not a git repository" out.
+# assigned via a second variable: a failing command substitution would blank
+# $repo_dir before the message that has to name it
+toplevel="$(git -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "wt: '$repo_dir' is not a git repo — cd into the repo, or name it:" >&2
+  echo "    wt $cmd /path/to/repo ${branch:-<branch>}   (bare names: WT_REPOS)" >&2
+  exit 1
+}
+repo_dir="$toplevel"
 repo_name="$(basename "$repo_dir")"
 [ -n "$worktree_path" ] || worktree_path="$HOME/.worktrees/$repo_name/$branch"
 # The activity name is path-derived (wt_name), like everywhere else — never the
@@ -578,11 +625,20 @@ add)
     if [ -z "$newbranch" ] && [ -z "$local_ref" ] && [ -z "$remote_ref" ]; then
       if [ -n "$origin_down" ]; then
         echo "wt: no local branch '$branch', and origin is unreachable" >&2
+        exit 1
+      elif [ -n "$from_session" ]; then
+        # continuing a cloud session that has not pushed: the branch exists only
+        # in its sandbox, so create it here (off HEAD) rather than refusing —
+        # asking for -b would just retype a name the session already chose
+        echo "'$branch' not pushed yet — creating it off ${base:-$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)}"
+        newbranch=1
       else
         echo "wt: no branch '$branch' here or on origin" >&2
-        echo "    create it with: wt add -b $branch ${base:-[base-branch]}" >&2
+        # repeat the repo when it came from an argument: pasting the hint from
+        # outside the repo would otherwise fail with 'not a git repo'
+        echo "    create it with: wt add ${explicit_repo:+$repo_dir }-b $branch ${base:-[base-branch]}" >&2
+        exit 1
       fi
-      exit 1
     fi
     mkdir -p "$(dirname "$worktree_path")"
     if [ -n "$newbranch" ]; then
@@ -616,10 +672,16 @@ add)
   [ -n "$session" ] && echo "claude.ai session: $session"
 
   activity_id="$(find_activity "$activity_name")"
-  if [ -z "$activity_id" ]; then
+  [ -n "$activity_id" ] ||
     activity_id=$(qdbus6 "$am" "$amp" "$ami.AddActivity" "$activity_name")
-    qdbus6 "$am" "$amp" "$ami.SetActivityIcon" "$activity_id" "git-branch"
-  fi
+  # Set on every add, not just on create: the switcher shows the name (the join
+  # key, so no marker can go in it) plus the icon, which makes the icon the only
+  # place a repo can be told from another at a glance — and activities created
+  # before repo_mark existed still carry the old generic git-branch icon.
+  # Non-fatal: wt add now does this every run, and a failed repaint of an icon
+  # is no reason to abandon a worktree that is already on disk.
+  IFS=$'\t' read -r _ _ repo_icon <<<"$(repo_mark "${activity_name%%: *}")"
+  qdbus6 "$am" "$amp" "$ami.SetActivityIcon" "$activity_id" "$repo_icon" || true
   qdbus6 "$am" "$amp" "$ami.SetCurrentActivity" "$activity_id"
 
   # wt does not touch the desktop wallpaper. It used to set a per-repo solid

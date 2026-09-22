@@ -42,11 +42,12 @@ branch's current actor.
 claude.ai/code cloud sessions count too: `wt cloud` lists them urgent-first
 (`needs you` / `failed` / `working` / `your turn` / `done`) with branch, age,
 and the session's own "where I left off" line; branches are OSC-8 links.
-A worktree is tied to the session that pushed its branch (auto-detected from
+A worktree is tied to the session that owns its branch (auto-detected from
 the live list or the PR body, or set with `--session`), giving the card a
 `cloud your turn 11h` chip and Chrome that session as a tab. `wt add
 <session-id|URL>` starts from the other end: checks out whatever branch the
-session pushed. `wt dashboard` puts the session list on a desktop as a card —
+session works on, creating it locally if the session never pushed it.
+`wt dashboard` puts the session list on a desktop as a card —
 `local` badge on branches you have checked out, hover button to switch or
 `wt add` — and reinstalls every branch card, so it's the one command for
 fixing widgets.
@@ -132,11 +133,13 @@ cp "$REPO/config.example" ~/.config/wt/config   # then uncomment what you need
 
 | Variable | Default | What |
 |---|---|---|
+| `WT_REPOS` | *(empty)* | parent dirs searched when the repo is a bare name, space-separated — makes `wt add apify-mcp-server fix/x` work from anywhere; first hit wins |
 | `WT_IDE` | `webstorm` | IDE command, run as `$WT_IDE <worktree-path>`; may carry flags |
 | `WT_CHROME_PROFILE` | `Default` | Chrome `--profile-directory`. Make a dedicated profile so wt windows can't clobber your personal session-restore; directory names are in `~/.config/google-chrome/Local State` |
 | `WT_URLS` | *(empty)* | extra Chrome tabs per worktree, space-separated |
 | `WT_DASHBOARD_ACTIVITY` | `Work` | plain activity that gets the cloud-session card |
 | `WT_WINDOW_CLASSES` | `jetbrains-webstorm org.wezfurlong.wezterm google-chrome` | window classes pinned to the new activity — change alongside `WT_IDE` |
+| `WT_REPO_MARKS` | *(empty)* | pin a repo's color, `"<repo>:<color>[:<emoji>]"` space-separated — e.g. `"wt:green:🌳 apify-mcp-server:violet"`. Colors: `red orange yellow green blue violet brown grey`. Unlisted repos get a stable color from their name |
 | `WT_CARD_CLOUD` | `1240 760` | cloud card size, `"<width> <height>"` px. Taller shows more sessions (the list scrolls past the bottom) |
 | `WT_CARD_BRANCH` | `1000 170` | branch card size, `"<width> <height>"` px. Wider means less eliding; it's a fixed 7 rows, so extra height is blank |
 

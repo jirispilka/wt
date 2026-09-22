@@ -4,7 +4,7 @@
   wt-cloud list [--all] [branch…]   recent cloud sessions, needs-you first
                                     (branch args: skip those, they are local)
   wt-cloud lookup <branch> [repo]   one TSV line (state, age, url) for a branch
-  wt-cloud branch <session> [repo]  the branch a session pushed (the reverse)
+  wt-cloud branch <session> [repo]  the branch a session works on (the reverse)
   wt-cloud json                     one card for the wt board plasmoid
   wt-cloud raw [match]              raw api records, for when the shape drifts
   wt-cloud refresh                  refresh the snapshot now
@@ -32,11 +32,14 @@ import urllib.request
 WT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wt")
 
 TTL = 30  # seconds a snapshot stays fresh
-MAX_AGE = 48 * 3600  # older than this is archaeology, not a to-do; --all shows it
+MAX_AGE = 7 * 86400  # older than this is archaeology, not a to-do; --all shows it
+WINDOW = "%dd" % (MAX_AGE // 86400)  # how the window is spelled where it is shown
 RANK = {"needs-you": 0, "failed": 1, "working": 2, "your-turn": 3, "done": 4}
 GLYPH = {"needs-you": ("31;1", "!"), "failed": ("31", "✘"), "working": ("32", "●"),
          "your-turn": ("33", "?"), "done": ("2", "∙")}
-API = "https://api.anthropic.com/v1/code/sessions?limit=30"
+# limit must outrun MAX_AGE: the api returns newest-first, so a small page
+# silently truncates the window long before the age filter does
+API = "https://api.anthropic.com/v1/code/sessions?limit=100"
 CRED = os.path.expanduser("~/.claude/.credentials.json")
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
                      "wt-status")
@@ -219,11 +222,33 @@ def worktrees():
     return out
 
 
+def repo_roots():
+    """The parent dirs `wt add <bare-repo-name> <branch>` searches (WT_REPOS).
+    Read out of wt's config, since wt does not export it. The file is shell, but
+    a list of parent dirs is a quoted literal at worst — shlex drops the quotes
+    and a trailing comment, then it word-splits like `for d in $WT_REPOS` does."""
+    v = os.environ.get("WT_REPOS")
+    if v is None:
+        try:
+            with open(os.path.expanduser("~/.config/wt/config")) as f:
+                for line in f:
+                    if line.startswith("WT_REPOS="):
+                        v = line.split("=", 1)[1]
+        except OSError:
+            pass
+    words = " ".join(shlex.split(v, comments=True)) if v else ""
+    return [os.path.expanduser(os.path.expandvars(p)) for p in words.split()]
+
+
 def clones():
-    """{repo-dir-name: path} for clones wt already knows, read out of the gitdir
-    pointer in each worktree's .git file. Repos never checked out are unknown —
-    the widget just leaves out their action."""
+    """{repo-dir-name: path} for every clone wt can reach: the ones under
+    WT_REPOS, plus the ones an existing worktree points at (which may live
+    outside it). A repo cloned nowhere stays unknown — the widget then just
+    leaves out that row's action, since there is nothing to check out from."""
     out = {}
+    for root in repo_roots():
+        for g in glob.glob(os.path.join(root, "*", ".git")):
+            out[os.path.basename(os.path.dirname(g))] = os.path.dirname(g)
     for g in glob.glob(os.path.expanduser("~/.worktrees/*/**/.git"), recursive=True):
         try:
             with open(g) as f:
@@ -267,7 +292,9 @@ def cmd_json(_argv):
         head, repo = pick_head(s["heads"], wt, repos)
         row = {"state": s["state"].replace("-", " "), "level": LEVEL.get(s["state"], "normal"),
                "age": fmt_age(age(s["updated_at"])), "name": head or repo or "?",
-               "note": s["needs_action"] or s["detail"] or "", "url": s["url"]}
+               "title": s["title"], "note": s["needs_action"] or s["detail"] or "",
+               # the web id, not the api's cse_ one: this is what a human pastes
+               "session": s["url"].rsplit("/", 1)[-1], "url": s["url"]}
         if head in wt:  # already local: jump to its activity
             row.update(tag="local", execIcon="preferences-desktop-activities",
                        execTip="switch to this activity",
@@ -284,7 +311,7 @@ def cmd_json(_argv):
         badge = {"text": "%d working" % counts["working"], "level": "ok"}
     else:
         badge = {"text": "%d active" % len(rows), "level": "dim"}
-    sub = "%d in the last %dh" % (len(rows), MAX_AGE // 3600)
+    sub = "%d in the last %s" % (len(rows), WINDOW)
     if err:
         sub = err
     elif snap and time.time() - snap.get("at", 0) > TTL * 4:
@@ -295,7 +322,7 @@ def cmd_json(_argv):
 
 
 def cmd_branch(argv):
-    """A session id/url -> the branch it pushed. Reverse of lookup."""
+    """A session id/url -> the branch it works on (pushed or not). Reverse of lookup."""
     key = (argv[0] if argv else "").rstrip("/").rsplit("/", 1)[-1].split("_", 1)[-1]
     repo = slug(argv[1]) if len(argv) > 1 else ""
     if not key:
@@ -338,7 +365,7 @@ def cmd_list(hide, show_all=False):
     shown.sort(key=lambda s: s["updated_at"], reverse=True)  # stable: newest within rank
     shown.sort(key=lambda s: RANK.get(s["state"], 9))
     if not shown:  # stderr, so an embedding caller can drop its heading too
-        print("no cloud sessions in the last %dh" % (MAX_AGE // 3600), file=sys.stderr)
+        print("no cloud sessions in the last %s" % WINDOW, file=sys.stderr)
         return 1
     # piped (wt list embeds us) there is no tty to measure — assume narrow
     width = shutil.get_terminal_size((100, 24)).columns
@@ -347,7 +374,9 @@ def cmd_list(hide, show_all=False):
         # the branch identifies the session and is what you'd hand to wt add;
         # the detail line is why you don't have to open the browser
         head = next((b for _, b in s["heads"]), "") or (s["repos"][0] if s["repos"] else "")
-        note = s["needs_action"] or s["detail"] or ""
+        # title first — the branch is generated, the title is what a human named
+        # it; the note is a sentence and can lose its tail to the width
+        note = "  —  ".join(t for t in (s["title"], s["needs_action"] or s["detail"]) if t)
         # never truncate the branch — it is what you paste into wt add
         room = max(20, width - 21 - max(45, len(head)))
         # pad before coloring — escape codes would eat the column width
@@ -357,8 +386,8 @@ def cmd_list(hide, show_all=False):
             c("2", note[:room] + ("…" if len(note) > room else "")),
             c("36", " *") if s["unread"] else ""))
     if len(live) > len(shown):
-        print(c("2", "%d older than %dh not shown — wt cloud --all"
-                % (len(live) - len(shown), MAX_AGE // 3600)))
+        print(c("2", "%d older than %s not shown — wt cloud --all"
+                % (len(live) - len(shown), WINDOW)))
     return 0
 
 

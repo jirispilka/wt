@@ -16,10 +16,20 @@ _wt() {
 
     local cmd=${words[2]} repo=.
     local -i pos=CURRENT
-    # optional repo-dir first arg shifts the branch/base positions
+    # optional repo first arg shifts the branch/base positions. A bare repo name
+    # resolves against WT_REPOS, which only wt sources — so read it in a subshell
+    # (plain shell file), else branch completion would list the wrong repo's.
     if [[ -e ${words[3]}/.git ]]; then
         repo=${words[3]}
         (( pos-- ))
+    elif [[ -n ${words[3]} ]]; then
+        local cfg=${XDG_CONFIG_HOME:-$HOME/.config}/wt/config d
+        for d in ${(z)"$( [[ -r $cfg ]] && . $cfg 2>/dev/null; print -r -- ${WT_REPOS:-} )"}; do
+            [[ -e $d/${words[3]}/.git ]] || continue
+            repo=$d/${words[3]}
+            (( pos-- ))
+            break
+        done
     fi
 
     # flags occupy no positional slot

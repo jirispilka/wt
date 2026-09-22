@@ -30,6 +30,16 @@ ami="org.kde.ActivityManager.Activities"
 # description; the widget keeps it fresh anyway.
 repo_name=$(basename "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")")
 
+# The idle-state icon is the repo's color, not a generic one: this used to be
+# a hardcoded "git-branch" until it fought wt's own repo_mark icon for the
+# same Activity-icon slot — this script runs every widget tick (5-10s) and
+# always won, so the color never stuck. WT_REPO_MARKS needs the same config
+# wt itself reads; wt-status otherwise has no reason to source it.
+wt_config="${XDG_CONFIG_HOME:-$HOME/.config}/wt/config"
+[ -r "$wt_config" ] && . "$wt_config"
+eval "$(sed -n '/^repo_mark()/,/^}/p' "$script_dir/wt")"
+IFS=$'\t' read -r _ _ repo_icon <<<"$(repo_mark "$repo_name")"
+
 # The activity is keyed by the worktree PATH, not by $branch above: a git
 # checkout inside the worktree must not orphan its activity (see wt's wt_name).
 # $branch still drives the PR/CI/cloud lookups below — that is the work you are
@@ -347,16 +357,16 @@ read_desc_cache() { # -> verdict, facts, icon, pr_url globals (1 if no cache)
     [ -f "$cache_file.desc" ] || return 1
     verdict=$(sed -n 1p "$cache_file.desc")
     facts=$(sed -n 2p "$cache_file.desc")
-    icon=$(cat "$cache_file.icon" 2>/dev/null) || icon="git-branch"
+    icon=$(cat "$cache_file.icon" 2>/dev/null) || icon="$repo_icon"
     pr_url=$(cat "$cache_file.url" 2>/dev/null) || pr_url=""
-    [ -n "$icon" ] || icon="git-branch"
+    [ -n "$icon" ] || icon="$repo_icon"
 }
 
 if [ "$mode" = "preview" ]; then
     if read_desc_cache; then
         compose "" "$verdict" "$facts" "$icon"
     fi
-    compose "" "(no cached PR status yet — run wt list)" "" "git-branch"
+    compose "" "(no cached PR status yet — run wt list)" "" "$repo_icon"
 fi
 
 if [ "$mode" != "force" ] && [ -f "$cache_file" ] && [ -f "$cache_file.desc" ]; then
@@ -402,7 +412,7 @@ if [ -z "$pr_json" ]; then
          {label: "ci", spans: [{t: "—", level: "dim"}]},
          {label: "rev", spans: [{t: "—", level: "dim"}]},
          {label: "issues", spans: [{t: "—", level: "dim"}]}]')
-    finish "$html" "🌱 no PR yet" "$facts" "git-branch"
+    finish "$html" "🌱 no PR yet" "$facts" "$repo_icon"
 fi
 
 pr_url=$(jq -r '.url // ""' <<<"$pr_json")   # link_pr needs it outside the jq below
@@ -410,7 +420,7 @@ pr_url=$(jq -r '.url // ""' <<<"$pr_json")   # link_pr needs it outside the jq b
 # The PR author is always shown by login, never as "mine": your own handle says
 # that already, and dropping the distinction also drops a `gh api user` call
 # from every uncached refresh.
-out=$(jq -r '
+out=$(jq -r --arg repo_icon "$repo_icon" '
     def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
     def cls: (.conclusion // .state // "PENDING");
 
@@ -435,7 +445,7 @@ out=$(jq -r '
     (if $verdict | test("merged|ready") then "dialog-ok-apply"
      elif $verdict | test("failing|changes|closed|conflicts") then "dialog-warning"
      elif $verdict | test("running") then "system-run"
-     else "git-branch" end) as $icon |
+     else $repo_icon end) as $icon |
 
     ("PR #\(.number) \(.author.login | esc)"
         + (if ($checks | length) > 0 then

@@ -6,8 +6,8 @@
  *     "layout": "fields" | "list", "rows": [...] }
  *
  *   layout "fields": rows = [{label, text | spans:[{t,level}], level, url}]
- *   layout "list":   rows = [{state, level, age, name, note, url, tag,
- *                             exec, execIcon, execTip}]
+ *   layout "list":   rows = [{state, level, age, name, title, note, url, tag,
+ *                             session, exec, execIcon, execTip}]
  *
  *   lvl: ok | warn | error | info | dim | normal  — resolved to theme colors
  *   here, never hardcoded, so the widget follows the Plasma color scheme.
@@ -255,6 +255,7 @@ PlasmoidItem {
             reuseItems: true
 
             QQC.ScrollBar.vertical: QQC.ScrollBar {
+                id: vbar
                 policy: list.contentHeight > list.height ? QQC.ScrollBar.AsNeeded
                                                          : QQC.ScrollBar.AlwaysOff
             }
@@ -273,6 +274,12 @@ PlasmoidItem {
                     onTapped: Qt.openUrlExternally(row.modelData.url)
                 }
 
+                // the session id has no column to live in — 30 opaque chars per
+                // row — but it is what you paste into `wt cloud branch`
+                QQC.ToolTip.text: row.modelData.session || ""
+                QQC.ToolTip.visible: hover.hovered && !execButton.hovered
+                                     && QQC.ToolTip.text !== ""
+
                 Rectangle {
                     anchors.fill: parent
                     radius: Kirigami.Units.smallSpacing
@@ -287,7 +294,12 @@ PlasmoidItem {
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.leftMargin: Kirigami.Units.smallSpacing
+                    // the ScrollBar floats over the row, so it lands on the
+                    // action button unless the content gives way for it
+                    // size < 1 means it has something to scroll: styles disagree
+                    // on whether an idle AsNeeded bar is hidden or just empty
                     anchors.rightMargin: Kirigami.Units.smallSpacing
+                                         + (vbar.visible && vbar.size < 1 ? vbar.width : 0)
                     spacing: 0
 
                     RowLayout {
@@ -335,6 +347,7 @@ PlasmoidItem {
                             Layout.preferredWidth: Kirigami.Units.gridUnit * 1.8
                         }
                         PlasmaComponents.ToolButton {
+                            id: execButton
                             visible: !!row.modelData.exec
                             opacity: hover.hovered ? 1 : 0.25
                             icon.name: row.modelData.execIcon || "list-add"
@@ -348,7 +361,11 @@ PlasmoidItem {
                     }
                     PlasmaComponents.Label {
                         visible: text !== ""
-                        text: row.modelData.note || ""
+                        // the session title first: the branch above is generated,
+                        // this is the name a human gave it. Title before note so
+                        // eliding eats the sentence, not the identity.
+                        text: [row.modelData.title, row.modelData.note]
+                              .filter(function (t) { return !!t }).join("  —  ")
                         color: Kirigami.Theme.disabledTextColor
                         font: Kirigami.Theme.smallFont
                         elide: Text.ElideRight

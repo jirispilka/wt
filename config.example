@@ -1,6 +1,11 @@
 # wt config — copy to ~/.config/wt/config. Plain shell, sourced by wt.
 # Everything is optional; these are the defaults.
 
+# Parent dirs searched when the repo is given as a bare name, space-separated:
+# with this set, 'wt add apify-mcp-server fix/x' works from anywhere. First hit
+# wins. A path (or being inside the repo) always works without it.
+#WT_REPOS="$HOME/apify $HOME/github/jirispilka"
+
 # IDE opened on the worktree, run as: $WT_IDE <worktree-path>. May carry flags.
 #WT_IDE="webstorm"
 
@@ -19,6 +24,16 @@
 # window class here (find it: qdbus6 org.kde.KWin /KWin queryWindowInfo, then
 # click the window).
 #WT_WINDOW_CLASSES="jetbrains-webstorm org.wezfurlong.wezterm google-chrome"
+
+# Per-repo color, so repos are told apart in 'wt list' (tinted name + emoji)
+# and in the activity switcher (a folder-<color> icon — the activity NAME is a
+# join key, so no marker can go there). Space-separated "<repo>:<color>[:<emoji>]";
+# the emoji defaults to the color's circle. Colors: red orange yellow green
+# blue violet brown grey. Repos you don't list get a stable color derived from
+# their name, so this is only for pinning one, or breaking a collision.
+# Existing activities pick up a color change on their next wt-status tick
+# (instantly with 'wt add'/'wt dashboard', which also paint it right away).
+#WT_REPO_MARKS="wt:green:🌳 apify-mcp-server:violet"
 
 # Card sizes on the desktop, "<width> <height>" in pixels. A desktop applet is
 # sized once when it is created and never grows into its content, so these are

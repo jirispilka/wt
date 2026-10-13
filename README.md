@@ -37,7 +37,8 @@ The card's `agent` row is live (~5s): Claude Code via hooks (`wt-agent-state`;
 busy/blocked/idle), Codex hook-free (rollout write age; a wezterm pane titled
 "Action Required" = blocked), Cursor hook-free (chat-dir write age, no blocked
 detection). A working or blocked agent overrides the verdict — it's the
-branch's current actor.
+branch's current actor. A cloud session is the exception once the PR is merged
+or closed: it may have moved on to its next branch, so it's shown as a fact.
 
 claude.ai/code cloud sessions count too: `wt cloud` lists them urgent-first
 (`needs you` / `failed` / `working` / `your turn` / `done`) with branch, age,

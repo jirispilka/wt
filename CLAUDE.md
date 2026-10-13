@@ -49,7 +49,10 @@ Plasma theme. All quoting is done by `jq`/`json.dump`, never by hand.
 icon) leads with one verdict — "what is the next action for this branch" — then facts. The
 verdict is computed once, in `wt-status`'s big jq program, from the `gh pr view` JSON, and a
 live coding agent can *override* it: `agent_rank` 3 (blocked) or 2 (working) replaces the
-verdict in `compose()`, because the agent is the branch's current actor.
+verdict in `compose()`, because the agent is the branch's current actor. The one exception is
+a cloud session on a merged or closed PR: its join to the branch is only "it once pushed this
+branch", so a batch session busy on its next branch would mark every finished branch as
+working — `compose()` demotes it to a fact there.
 
 **The emoji vocabulary is internal.** `wt-status` builds status strings with emoji
 (`🤖 ✋ 💤 ❔ ❌ ⏳ ✅ 🟣`), then translates: `stylize()` (sed) → ANSI glyphs for terminals,

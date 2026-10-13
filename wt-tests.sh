@@ -45,6 +45,35 @@ Session: $u")"
 t "no link"        ""   "$(body "just a normal PR body")"
 t "last wins"      "$u" "$(body "https://claude.ai/code/session_old $u")"
 
+# wt-status's verdict override, hermetic: a throwaway worktree under a fake
+# HOME, a stub gh on PATH, a cloud snapshot planted where wt-cloud reads it.
+# The cloud join is "a session once pushed this branch", so a batch session
+# busy on its next branch must not turn every merged branch it left behind
+# into "cloud working": merged is final, the session is then a fact.
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+wtp="$tmp/.worktrees/repo/feat-x"
+mkdir -p "$wtp" "$tmp/bin" "$tmp/cache/wt-status" "$tmp/run"
+git -C "$wtp" init -q -b feat-x
+git -C "$wtp" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+cat >"$tmp/bin/gh" <<'SH'
+#!/bin/sh
+# only `gh pr view --json …` is reached: the stub always has a PR
+printf '{"number":7,"title":"T","url":"https://github.com/o/r/pull/7","state":"%s","isDraft":false,"author":{"login":"me"},"reviewDecision":"","latestReviews":[],"reviewRequests":[],"statusCheckRollup":[],"closingIssuesReferences":[],"additions":1,"deletions":0,"mergeStateStatus":"CLEAN","body":""}\n' "$FAKE_PR_STATE"
+SH
+chmod +x "$tmp/bin/gh"
+jq -n --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000000Z)" '{at: (now | floor), sessions: [
+    {id: "cse_01AbC", url: "https://claude.ai/code/session_01AbC", title: "T",
+     state: "working", detail: "", needs_action: null, category: "", unread: false,
+     repos: [], heads: [["", "feat-x"]], updated_at: $ts}]}' >"$tmp/cache/wt-status/cloud.json"
+status() { # <pr state> -> "verdict|facts", ANSI stripped, ages normalized
+    FAKE_PR_STATE=$1 HOME=$tmp XDG_CACHE_HOME=$tmp/cache XDG_RUNTIME_DIR=$tmp/run \
+        PATH="$tmp/bin:$PATH" WT_FORCE=1 ./wt-status "$wtp" plain |
+        sed -E $'s/\x1b\\[[0-9;]*m//g; s/ [0-9]+s$/ Ns/' | sed -n '2,3p' | paste -sd'|'
+}
+t "cloud overrides open"   "● cloud working Ns|PR #7 me"                        "$(status OPEN)"
+t "merged beats cloud"     "merged — wt remove?|PR #7 me · ● cloud working Ns"  "$(status MERGED)"
+t "closed beats cloud"     "closed|PR #7 me · ● cloud working Ns"               "$(status CLOSED)"
+
 # wt-cloud's normalize(): the private-API shape, from a real (redacted) response
 python3 - <<'PY' || fail=1
 import importlib.machinery, importlib.util, sys

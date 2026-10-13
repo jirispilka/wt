@@ -262,20 +262,23 @@ if [ "$mode" != "preview" ] && [ -x "$script_dir/wt-cloud" ]; then
         printf '%s\n' "$session_url" > "$session_file" 2>/dev/null || true
     fi
 fi
+# Held back from add_agent: whether this line may take the verdict depends on
+# the PR state, and compose() is the first place that knows it (cached or fresh).
+cloud_rank=0 cloud_line=""
 case "$cloud_state" in
-    working)   add_agent 2 "🤖 cloud working $(fmt_age "$cloud_age")" ;;
-    needs-you) add_agent 3 "✋ cloud needs you $(fmt_age "$cloud_age")" ;;
+    working)   cloud_rank=2 cloud_line="🤖 cloud working $(fmt_age "$cloud_age")" ;;
+    needs-you) cloud_rank=3 cloud_line="✋ cloud needs you $(fmt_age "$cloud_age")" ;;
     failed)
         # ponytail: a failure you have not looked at in hours is a to-do, not an
         # interrupt — only a fresh one takes the verdict. Tune the hour here.
-        [ "$cloud_age" -lt 3600 ] && r=3 || r=1
-        add_agent "$r" "✋ cloud failed $(fmt_age "$cloud_age")" ;;
+        [ "$cloud_age" -lt 3600 ] && cloud_rank=3 || cloud_rank=1
+        cloud_line="✋ cloud failed $(fmt_age "$cloud_age")" ;;
     # the last turn ended on a question: pending, never the verdict — every
     # cloud session ends this way, so it would drown out everything else
-    your-turn) add_agent 1 "❔ cloud your turn $(fmt_age "$cloud_age")" ;;
-    done)      add_agent 1 "💤 cloud done $(fmt_age "$cloud_age") ago" ;;
+    your-turn) cloud_rank=1 cloud_line="❔ cloud your turn $(fmt_age "$cloud_age")" ;;
+    done)      cloud_rank=1 cloud_line="💤 cloud done $(fmt_age "$cloud_age") ago" ;;
     # link known (hand-set, or read off the PR body) but no live state
-    *)       [ -n "$session_url" ] && add_agent 1 "💤 cloud linked" ;;
+    *)       [ -n "$session_url" ] && cloud_rank=1 cloud_line="💤 cloud linked" ;;
 esac
 
 # ---- local working-tree state — live like the agent line, never cached ----
@@ -304,6 +307,15 @@ touch "$cache_file.run"    # heartbeat: proves the widget tick is alive
 # is the branch's current actor, whatever the PR says.
 compose() { # <html-body> <verdict> <facts> <icon>
     local html="$1" verdict="$2" facts="$3" icon="$4"
+    # The cloud join is weak — "a session once pushed this branch" — so a batch
+    # session busy on its next branch would mark every merged branch it left
+    # behind as working. Merged and closed are final: the cloud line is then a
+    # fact, never the verdict. Process agents keep overriding; they are in this
+    # worktree.
+    if [ -n "$cloud_line" ]; then
+        case "$verdict" in "🟣 "* | "⛔ "*) [ "$cloud_rank" -gt 1 ] && cloud_rank=1 ;; esac
+        add_agent "$cloud_rank" "$cloud_line"
+    fi
     case "$agent_rank" in
         3) verdict="$agent_status" icon="dialog-warning" ;;
         2) verdict="$agent_status" icon="system-run" ;;

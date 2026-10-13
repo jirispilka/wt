@@ -6,6 +6,7 @@ _wt() {
         'remove:close windows, remove worktree + activity'
         'list:all worktrees with agent/PR/CI status'
         'switch:fzf picker, Enter switches activity'
+        'restore:reopen a worktree'"'"'s windows in its activity'
         'cloud:claude.ai/code sessions, needs-you first'
         'dashboard:install the cloud-session widget on an activity'
     )
@@ -52,6 +53,9 @@ _wt() {
     case $cmd in
         cloud)
             compadd -X 'flag' -- --all
+            ;;
+        list)
+            compadd -X 'flag' -- -f
             ;;
         dashboard)
             local -a acts

@@ -38,7 +38,8 @@ kwini="org.kde.kwin.Scripting"
 usage() {
   echo "usage: wt add [repo] <branch> | -b <new-branch> [base] | <session-id>" >&2
   echo "       wt remove [-f] [[repo] <branch-name> | <number>]" >&2
-  echo "       wt list | wt switch [number] | wt cloud | wt dashboard [activity]" >&2
+  echo "       wt list [-f] | wt switch [number] | wt restore <number>" >&2
+  echo "       wt cloud | wt dashboard [activity]" >&2
   echo "run 'wt --help' for details" >&2
   exit 1
 }
@@ -52,8 +53,9 @@ USAGE
   wt add [repo] -b <branch> [base]                create the branch first
   wt add [repo] <session-id|claude.ai/code url>   branch comes from that session
   wt remove [-f] [[repo] <branch> | <number>]     windows, worktree, branch, activity
-  wt list                                         numbered entries + cloud sessions
+  wt list [-f]                                    numbered entries + cloud sessions
   wt switch [number]                              fzf picker, or jump to entry n
+  wt restore <number>                             reopen entry n's windows in its activity
   wt cloud [--all]                                claude.ai/code sessions, urgent first
   wt dashboard [activity]                         (re)install every board card
 
@@ -84,13 +86,20 @@ REMOVE
   name is resolved across ~/.worktrees, a number is a wt-list entry.
   -f: remove a dirty worktree and delete an unmerged branch (squash-merged PRs
   always look unmerged to git). Both throw work away.
+  list -f: skip the caches — fresh PR/CI from GitHub and a fresh cloud snapshot.
 
 LIST / SWITCH
   Numbered: $WT_DASHBOARD_ACTIVITY first, other plain activities, then every
   worktree with agent (claude/codex), PR, CI and review status, Personal last;
-  ● is current. The numbers feed 'wt switch <n>' and 'wt remove <n>'
-  (Meta+1..4 are bound to entries 1-4). The trailing 'cloud elsewhere' block is
+  ● is current. The numbers feed 'wt switch <n>', 'wt restore <n>' and
+  'wt remove <n>' (Meta+1..4 are bound to entries 1-4). The trailing 'cloud elsewhere' block is
   the sessions with no worktree here — the rest show up as a row's cloud chip.
+
+RESTORE
+  After a reboot: reopens wezterm, $WT_IDE and Chrome for one worktree, pinned to
+  its activity — 'wt add' on the existing worktree. Turn off the IDE's "reopen
+  projects on startup" and Plasma's session restore, or the restored windows land
+  in whatever activity is current and the IDE just focuses its stray window.
 
 CLOUD
   Recent sessions, 'needs you' (a live prompt) first, then failed, working,
@@ -166,7 +175,7 @@ find_activity() {
 cmd="$1"
 shift
 case "$cmd" in
-add | remove | list | switch | cloud | dashboard) ;;
+add | remove | list | switch | restore | cloud | dashboard) ;;
 -h | --help | help) help ;;
 *) usage ;;
 esac
@@ -181,7 +190,8 @@ norm_session() { # <claude.ai/code url | session_… | cse_… id> -> canonical 
   esac
 }
 
-# -f/--force (remove only): force dirty-worktree removal + unmerged-branch deletion
+# -f/--force (remove): force dirty-worktree removal + unmerged-branch deletion
+# -f/--force (list): bypass the PR/CI and cloud caches
 # -b (add only): create the branch, like git checkout -b
 # --session (add only): the claude.ai/code session this worktree continues
 force="" session="" newbranch="" from_session=""
@@ -208,7 +218,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 set -- ${args[@]+"${args[@]}"}
-[ -n "$force" ] && [ "$cmd" != remove ] && usage
+[ -n "$force" ] && [ "$cmd" != remove ] && [ "$cmd" != list ] && usage
 { [ -n "$session" ] || [ -n "$newbranch" ]; } && [ "$cmd" != add ] && usage
 if [ -n "$session" ]; then
   session=$(norm_session "$session") || {
@@ -325,6 +335,13 @@ list)
   # Same reason wt-cloud cannot measure the width it renders into and assumes a
   # narrow one — which cost the note its room once the title moved in.
   if [ -t 1 ]; then export WT_TTY=1 COLUMNS="$(tput cols 2>/dev/null || echo 100)"; fi
+  if [ -n "$force" ]; then
+    # Cloud first and synchronously: every wt-status below runs `wt-cloud lookup`,
+    # and a refresh racing those would lose the lock and they'd read the old
+    # snapshot. `|| true`: offline must still list, from the last good snapshot.
+    [ -x "$script_dir/wt-cloud" ] && { "$script_dir/wt-cloud" refresh >/dev/null 2>&1 || true; }
+    export WT_FORCE=1
+  fi
   build_entries
   cur_name=""
   cur=$(qdbus6 "$am" "$amp" "$ami.CurrentActivity" 2>/dev/null) &&
@@ -351,12 +368,17 @@ list)
       # own stdout is never the terminal. $rst was gated up top, where it was.
       r_color=""
       [ -n "$rst" ] && r_color=$'\e[38;5;'"$r_ansi"m
-      printf '%2d %s%s%s%s %s%s %s%s\n' "$((i + 1))" "$mark" "$bold" "${name#*: }" "$rst" \
-        "$r_color" "$r_emoji" "${name%%: *}" "$rst"
-      body=""
-      while IFS= read -r l; do
-        body="${body:+$body $dim·$rst }$l"
-      done <"$tmp/$i"
+      # wt-status leads with the PR title; it goes on the header line, cut to
+      # the terminal width (+3: the emoji's double width and the separator)
+      { IFS= read -r title; body=""
+        while IFS= read -r l; do
+          body="${body:+$body $dim·$rst }$l"
+        done; } <"$tmp/$i"
+      room=$((${COLUMNS:-0} - 5 - ${#name} - 3))
+      [ "${COLUMNS:-0}" -gt 0 ] && [ "${#title}" -gt "$room" ] &&
+        if [ "$room" -gt 10 ]; then title="${title:0:room-1}…"; else title=""; fi
+      printf '%2d %s%s%s%s %s%s %s%s%s\n' "$((i + 1))" "$mark" "$bold" "${name#*: }" "$rst" \
+        "$r_color" "$r_emoji" "${name%%: *}" "$rst" "${title:+  $dim$title$rst}"
       printf '     %s\n\n' "$body"
     else
       printf '%2d %s%s%s%s %sactivity%s\n\n' "$((i + 1))" "$mark" "$bold" "$name" "$rst" "$dim" "$rst"
@@ -443,12 +465,12 @@ switch)
     sel=$(for i in "${!entry_names[@]}"; do
       n="${entry_names[i]}"
       if [ -n "${entry_paths[i]}" ]; then
-        body=""
-        while IFS= read -r l; do
-          body="${body:+$body $dim·$rst }$l"
-        done <"$tmp/$i"
-        printf '%d %s%s%s %s%s%s  %s\t%s\n' "$((i + 1))" \
-          "$bold" "${n#*: }" "$rst" "$dim" "${n%%: *}" "$rst" "$body" "$n"
+        { IFS= read -r title; body=""
+          while IFS= read -r l; do
+            body="${body:+$body $dim·$rst }$l"
+          done; } <"$tmp/$i"
+        printf '%d %s%s%s %s%s%s  %s%s\t%s\n' "$((i + 1))" \
+          "$bold" "${n#*: }" "$rst" "$dim" "${n%%: *}" "$rst" "${title:+$title $dim·$rst }" "$body" "$n"
       else
         printf '%d %s%s%s\t%s\n' "$((i + 1))" "$bold" "$n" "$rst" "$n"
       fi
@@ -462,6 +484,33 @@ switch)
   fi
   qdbus6 "$am" "$amp" "$ami.SetCurrentActivity" "$activity_id"
   exit 0
+  ;;
+restore)
+  # Reopen one worktree's windows, e.g. after a reboot, instead of trusting
+  # session restore. That is exactly `wt add` on an existing worktree (reuses
+  # the worktree and activity, then the open + pin path), so hand over to it.
+  # The branch passed is the path-derived one: add rebuilds the path from it,
+  # and the live checkout may differ (see wt_name).
+  # ponytail: one entry per call — the 120s class-based pin would hand every
+  # window to the last of several concurrent restores; restore-all needs a
+  # pin that claims one window per class and unloads itself, run serially.
+  case "${1:-}" in
+  "" | *[!0-9]*) usage ;;
+  esac
+  build_entries
+  [ "$1" -ge 1 ] && path="${entry_paths[$1 - 1]:-}" || path=""
+  if [ -z "$path" ]; then
+    if [ "$1" -ge 1 ] && [ -n "${entry_names[$1 - 1]:-}" ]; then
+      echo "#$1 is activity '${entry_names[$1 - 1]}', not a worktree" >&2
+    else
+      echo "no entry #$1 (see wt list)" >&2
+    fi
+    exit 1
+  fi
+  name="$(wt_name "$path")"
+  exec "$script_dir/wt" add \
+    "$(dirname "$(git -C "$path" rev-parse --path-format=absolute --git-common-dir)")" \
+    "${name#*: }"
   ;;
 esac
 

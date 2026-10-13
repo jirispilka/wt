@@ -5,9 +5,11 @@
 # action for this branch"), then FACTS (PR, CI counts, reviews), then detail.
 #   widget  (default): one JSON card for the wt board plasmoid
 #   activity desc/icon: plain 2-line text + a state icon (Meta+Q switcher)
-#   plain   : ANSI-styled 2-line summary (wt list)
+#   plain   : PR title line (empty if none), then ANSI-styled 2-line summary (wt list)
 #   preview : like plain but cache-only — never gh, never qdbus (wt switch)
 #   force   : skip the cache (activity-switch watcher)
+# WT_FORCE=1 skips the cache in any mode — mode is one slot, so plain cannot
+# also say force (wt list -f).
 set -uo pipefail
 
 script_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -16,10 +18,15 @@ path="${1:?usage: wt-status <worktree-path> [force|plain|preview]}"
 mode="${2:-}"
 nl=$'\n'
 
-cd "$path" 2>/dev/null || { echo "worktree gone: $path"; exit 0; }
+bail() { # <msg> — plain/preview output always leads with the title line
+    case "$mode" in plain|preview) echo ;; esac
+    echo "$1"; exit 0
+}
+
+cd "$path" 2>/dev/null || bail "worktree gone: $path"
 
 branch=$(git branch --show-current 2>/dev/null)
-[ -n "$branch" ] || { echo "detached HEAD"; exit 0; }
+[ -n "$branch" ] || bail "detached HEAD"
 
 am="org.kde.ActivityManager"
 amp="/ActivityManager/Activities"
@@ -311,6 +318,8 @@ compose() { # <html-body> <verdict> <facts> <icon>
     # and compose()'s jq as well, and this is a footnote, not a verdict.
     [ "$branch" = "$path_branch" ] || facts="${facts:+$facts · }checked out $branch"
     if [ "$mode" = "plain" ] || [ "$mode" = "preview" ]; then
+        # the title stays out of stylize(): it is free text, emoji included
+        printf '%s\n' "${pr_title:-}"
         printf '%s\n' "$verdict${facts:+$nl$facts}" | stylize | link_pr
     else
         # Fixed skeleton: same rows, same order, dim placeholders — the eye
@@ -345,7 +354,7 @@ compose() { # <html-body> <verdict> <facts> <icon>
                     + $rows)}'
         if [ -n "$activity_id" ]; then
             qdbus6 "$am" "$amp" "$ami.SetActivityDescription" \
-                "$activity_id" "$verdict$nl$facts" >/dev/null 2>&1
+                "$activity_id" "$verdict$nl${pr_title:-$facts}" >/dev/null 2>&1
             [ "$(qdbus6 "$am" "$amp" "$ami.ActivityIcon" "$activity_id" 2>/dev/null)" = "$icon" ] \
                 || qdbus6 "$am" "$amp" "$ami.SetActivityIcon" "$activity_id" "$icon" >/dev/null 2>&1
         fi
@@ -359,6 +368,7 @@ read_desc_cache() { # -> verdict, facts, icon, pr_url globals (1 if no cache)
     facts=$(sed -n 2p "$cache_file.desc")
     icon=$(cat "$cache_file.icon" 2>/dev/null) || icon="$repo_icon"
     pr_url=$(cat "$cache_file.url" 2>/dev/null) || pr_url=""
+    pr_title=$(cat "$cache_file.title" 2>/dev/null) || pr_title=""
     [ -n "$icon" ] || icon="$repo_icon"
 }
 
@@ -369,7 +379,7 @@ if [ "$mode" = "preview" ]; then
     compose "" "(no cached PR status yet — run wt list)" "" "$repo_icon"
 fi
 
-if [ "$mode" != "force" ] && [ -f "$cache_file" ] && [ -f "$cache_file.desc" ]; then
+if [ "$mode" != "force" ] && [ -z "${WT_FORCE:-}" ] && [ -f "$cache_file" ] && [ -f "$cache_file.desc" ]; then
     age=$(( $(date +%s) - $(stat -c %Y "$cache_file") ))
     if [ -n "$activity_id" ] \
         && [ "$activity_id" = "$(qdbus6 "$am" "$amp" "$ami.CurrentActivity" 2>/dev/null)" ]; then
@@ -388,10 +398,15 @@ finish() { # <html-body> <verdict> <facts> <icon> — cache, then emit
     printf '%s' "$4" > "$cache_file.icon"
     # link_pr needs the URL on cache hits too, and those never reach gh
     printf '%s' "${pr_url:-}" > "$cache_file.url"
+    # the switcher shows only name + description, and a branch name alone is
+    # often too terse to recognize. Two lines fit its tile, so with a PR the
+    # title takes the facts' line — the board card on the desktop has those.
+    printf '%s' "${pr_title:-}" > "$cache_file.title"
     compose "$1" "$2" "$3" "$4"
 }
 
 # ---- fresh PR data ----------------------------------------------------------
+pr_title=""   # a stale cache read above may have set it
 pr_json=$(gh pr view --json number,title,url,state,isDraft,author,reviewDecision,latestReviews,reviewRequests,statusCheckRollup,closingIssuesReferences,additions,deletions,mergeStateStatus,body 2>/dev/null) || pr_json=""
 
 if [ -z "$pr_json" ]; then
@@ -416,6 +431,7 @@ if [ -z "$pr_json" ]; then
 fi
 
 pr_url=$(jq -r '.url // ""' <<<"$pr_json")   # link_pr needs it outside the jq below
+pr_title=$(jq -r '.title // "" | gsub("[\\r\\n]+"; " ")' <<<"$pr_json")   # one line of the description
 
 # The PR author is always shown by login, never as "mine": your own handle says
 # that already, and dropping the distinction also drops a `gh api user` call

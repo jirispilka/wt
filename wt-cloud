@@ -210,13 +210,26 @@ def cmd_lookup(argv):
         print("\t".join([best["state"], str(secs if secs >= 0 else 10 ** 9), best["url"]]))
 
 
+WT_ROOT = os.path.expanduser("~/.worktrees")
+
+
+def worktree_dirs():
+    """Every worktree dir under ~/.worktrees, found by pruned walk: stop at the
+    first .git (a worktree root) instead of globbing `**` through node_modules —
+    that recursive glob spun at 100% CPU for an hour."""
+    for dirpath, dirnames, filenames in os.walk(WT_ROOT):
+        if dirpath != WT_ROOT and (".git" in dirnames or ".git" in filenames):
+            dirnames[:] = []
+            yield dirpath
+    return
+
+
 def worktrees():
     """{branch: repo-dir-name} for every wt worktree. ~/.worktrees/<repo>/<branch>
     encodes both, so no git calls — a branch with slashes is just a deeper path."""
-    root = os.path.expanduser("~/.worktrees")
     out = {}
-    for g in glob.glob(os.path.join(root, "*", "**", ".git"), recursive=True):
-        rel = os.path.relpath(os.path.dirname(g), root).split(os.sep)
+    for d in worktree_dirs():
+        rel = os.path.relpath(d, WT_ROOT).split(os.sep)
         if len(rel) > 1:
             out["/".join(rel[1:])] = rel[0]
     return out
@@ -249,7 +262,8 @@ def clones():
     for root in repo_roots():
         for g in glob.glob(os.path.join(root, "*", ".git")):
             out[os.path.basename(os.path.dirname(g))] = os.path.dirname(g)
-    for g in glob.glob(os.path.expanduser("~/.worktrees/*/**/.git"), recursive=True):
+    for d in worktree_dirs():
+        g = os.path.join(d, ".git")
         try:
             with open(g) as f:
                 p = f.read().strip().split(":", 1)[-1].strip()
